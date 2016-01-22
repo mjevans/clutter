@@ -63,30 +63,31 @@ class b2:
     # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
 
     #@staticmethod
-    def lookupBucket(bucket):
+    def lookupBucket(self, bucket):
         fname = os.path.join('buckets', '{}.json'.format(bucket))
         if os.path.exists(fname):
             return json.load(open(fname, 'r'))
         return None
 
     #@staticmethod
-    def storeBucket(bucket_obj):
+    def storeBucket(self, bucket_obj):
         with open(os.path.join('buckets', '{}.json'.format(bucket_obj['bucketName'])),
                     'w') as f:
             json.dump(bucket_obj, f, indent=0, sort_keys=True)
 
     #@staticmethod
-    def lookupFile(path, attr):
+    def lookupFile(self, path, attr):
         fname = '{}.json'.format(path)
         if os.path.exists(fname):  # FIXME: MAYBE: For the default 'on disk' implementation the attributes are presently ignored
             return json.load(open(fname, 'r'))
         return None
 
     #@staticmethod
-    def storeFile(path, attr):
+    def storeFile(self, path, attr, info):
+        info.update(attr)
         with open('{}.json'.format(path),
                     'w') as f:
-            json.dump(, f, indent=0, sort_keys=True)
+            json.dump(info, f, indent=0, sort_keys=True)
 
     # b2_authorize_account
     def b2Auth(self, _id = B2_AUTH_ID, _key = B2_AUTH_KEY):
@@ -131,7 +132,7 @@ class b2:
         req = { 'bucketId': bucket['bucketId'] }
         r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_url', verify=True, data = req)
         if 200 == r.status_code:
-            return = json.loads(r.text)
+            return json.loads(r.text)
         else:
             raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
@@ -162,6 +163,7 @@ class b2:
             with open(path, 'rb') as f:
                 r = ups.post(bucket['uploadUrl'], data=f, )
                 if 200 == r.status_code:
-                    self.storeFile(path, json.loads(r.text))
+                    self.storeFile(path, json.loads(r.text), info)
+                    return info.update(json.loads(r.text))
                 else:
                     raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
