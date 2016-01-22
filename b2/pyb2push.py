@@ -133,7 +133,7 @@ class b2:
         if 200 == r.status_code:
             return = json.loads(r.text)
         else:
-            raise RuntimeError("Bucket Create Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
     # b2_upload_file
     def b2UploadIfNew(self, bucket, path):
