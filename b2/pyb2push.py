@@ -71,8 +71,8 @@ class b2:
 
     #@staticmethod
     def storeBucket(self, bucket_obj):
-        with open(os.path.join('buckets', '{}.json'.format(bucket_obj['bucketName'])),
-                    'w') as f:
+        with open(os.path.join('buckets', '{}.json'.format(
+                        bucket_obj['bucketName'])), 'w') as f:
             json.dump(bucket_obj, f, indent=0, sort_keys=True)
 
     #@staticmethod
@@ -114,15 +114,32 @@ class b2:
                 'bucketName': bucket,
                 'bucketType': 'allPrivate'
                 }
-            r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_create_bucket', verify=True, data = req)
+            r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_create_bucket', verify=True, data = json.dumps(req))
             if 200 == r.status_code:
                 _bucket = json.loads(r.text)
             else:
+                robj = json.loads(r.text)
+                if robj['code'] == 'duplicate_bucket_name':
+                    print(  "WARNING: Duplicate bucket creation attempted, is our database complete?\n"
+                            "WARNING: Forcing enumeration of buckets.", file=sys.stderr)
+                    self.b2GetBuckets()
+                    if bucket in self.buckets:
+                        return self.buckets[bucket]
                 raise RuntimeError("Bucket Create Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
         self.storeBucket(_bucket)
-        self.buckets[jBucket['bucketName']] = _bucket
+        self.buckets[_bucket['bucketName']] = _bucket
         return _bucket
+
+    def b2GetBuckets(self):
+        r = self.post(self.session['apiUrl'] + '/b2api/v1/b2_list_buckets', verify=True, data = json.dumps({'accountId': self.session['accountId']}))
+        if 200 == r.status_code:
+            for _bucket in json.loads(r.text)['buckets']:
+                self.storeBucket(_bucket)
+        else:
+            raise RuntimeError("(get)Bucket List Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+
+    #def b2GetFiles(self):  https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
 
     # b2_get_upload_url
     def b2GetUploadURL(self, bucket):
@@ -130,7 +147,7 @@ class b2:
             bucket = self.b2GetOrCreateBucket(bucket)
 
         req = { 'bucketId': bucket['bucketId'] }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_url', verify=True, data = req)
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_url', verify=True, data = json.dumps(req))
         if 200 == r.status_code:
             return json.loads(r.text)
         else:
@@ -144,7 +161,7 @@ class b2:
         info['mtimens'] = stats.st_mtime_ns
         info['ctimens'] = stats.st_ctime_ns
 
-        _file = lookupFile(path, info)
+        _file = self.lookupFile(path, info)
         if _file is None:
             bucket = self.b2GetUploadURL(bucket)
             headers = {
@@ -164,6 +181,7 @@ class b2:
                 r = ups.post(bucket['uploadUrl'], data=f, )
                 if 200 == r.status_code:
                     self.storeFile(path, json.loads(r.text), info)
-                    return info.update(json.loads(r.text))
+                    info.update(json.loads(r.text))
+                    return info
                 else:
                     raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
