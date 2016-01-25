@@ -89,6 +89,15 @@ class b2:
                     'w') as f:
             json.dump(info, f, indent=0, sort_keys=True)
 
+    # an interface for bulk operations in other storage methods
+    def storeBuckets(self, buckets):
+        for bucket in buckets:
+            self.storeBucket(bucket)
+
+    def storeFiles(self, files)
+        for path, attr, info in files:
+            self.storeFile(path, attr, info)
+
     # b2_authorize_account
     def b2Auth(self, _id = B2_AUTH_ID, _key = B2_AUTH_KEY):
         auth = requests.auth.HTTPBasicAuth(_id, _key)
@@ -134,8 +143,7 @@ class b2:
     def b2GetBuckets(self):
         r = self.post(self.session['apiUrl'] + '/b2api/v1/b2_list_buckets', verify=True, data = json.dumps({'accountId': self.session['accountId']}))
         if 200 == r.status_code:
-            for _bucket in json.loads(r.text)['buckets']:
-                self.storeBucket(_bucket)
+            self.storeBuckets(json.loads(r.text)['buckets'])
         else:
             raise RuntimeError("(get)Bucket List Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
