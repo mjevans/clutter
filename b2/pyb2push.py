@@ -8,8 +8,6 @@
 
 # Python 3.4.2 reports hashlib.algorithms_guaranteed = {'sha224', 'sha384', 'sha1', 'sha512', 'md5', 'sha256'}
 
-IO_BUFFER_SIZE = 65536
-
 CONFIG_FILE = '.pyb2push'
 
 import json
@@ -19,6 +17,7 @@ import sys
 import datetime
 import base64
 import requests
+
 
 class b2:
     s = None
@@ -45,14 +44,12 @@ class b2:
 
     # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
 
-    #@staticmethod
     def lookupBucket(self, bucket):
         fname = os.path.join('buckets', '{}.json'.format(bucket))
         if os.path.exists(fname):
             return json.load(open(fname, 'r'))
         return None
 
-    #@staticmethod
     def storeBucket(self, bucket_obj):
         with open(os.path.join('buckets', '{}.json'.format(
                         bucket_obj['bucketName'])), 'w') as f:
@@ -64,14 +61,13 @@ class b2:
         except (Exception, ) as e:
             pass
 
-    #@staticmethod
     def lookupFile(self, path, attr):
         fname = '{}.json'.format(path)
-        if os.path.exists(fname):  # FIXME: MAYBE: For the default 'on disk' implementation the attributes are presently ignored
+        if os.path.exists(fname):
+            # FIXME: MAYBE: For the default 'on disk' implementation the attributes are presently ignored
             return json.load(open(fname, 'r'))
         return None
 
-    #@staticmethod
     def storeFile(self, path, attr, info):
         info.update(attr)
         with open('{}.json'.format(path),
@@ -93,8 +89,13 @@ class b2:
         for path, attr, info in files:
             self.storeFile(path, attr, info)
 
+
+
+
+
+
     # b2_authorize_account
-    def b2Auth(self, _id = None, _key = None):
+    def authorizeAccount(self, _id = None, _key = None):
         if _id is None: _id = self.b2id
         if _key is None: _key = self.b2key
         auth = requests.auth.HTTPBasicAuth(_id, _key)
@@ -106,8 +107,8 @@ class b2:
             raise PermissionError("Unable to login to Backblaze B2: Status {}\n{}\n\n".format(r.status_code, r.text))
         return self.session
 
-    # b2_create_bucket [A-Za-z0-9_-]{1,50}
-    def b2GetOrCreateBucket(self, bucket):
+    # b2_create_bucket [A-Za-z0-9_-]{1,50}  # b2GetOrCreateBucket
+    def createBucket(self, bucket):
         _bucket = None
         if bucket in self.buckets:
             return self.buckets[bucket]
@@ -128,7 +129,7 @@ class b2:
                 if robj['code'] == 'duplicate_bucket_name':
                     print(  "WARNING: Duplicate bucket creation attempted, is our database complete?\n"
                             "WARNING: Forcing enumeration of buckets.", file=sys.stderr)
-                    self.b2GetBuckets()
+                    self.listBuckets()
                     if bucket in self.buckets:
                         return self.buckets[bucket]
                 raise RuntimeError("Bucket Create Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
@@ -137,7 +138,8 @@ class b2:
         self.buckets[_bucket['bucketName']] = _bucket
         return _bucket
 
-    def b2GetBuckets(self):
+    # b2_list_buckets # b2GetBuckets
+    def listBuckets(self):
         r = self.post(self.session['apiUrl'] + '/b2api/v1/b2_list_buckets', verify=True, data = json.dumps({'accountId': self.session['accountId']}))
         if 200 == r.status_code:
             self.storeBuckets(json.loads(r.text)['buckets'])
@@ -145,7 +147,8 @@ class b2:
             raise RuntimeError("(get)Bucket List Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
     # If known, delete a bucket locally and remotely, returning the information object on success, returning None on the bucket not being known.
-    def b2DeleteBucketIfKnown(self, bname):
+    # b2_delete_bucket # b2DeleteBucketIfKnown
+    def deleteBucket(self, bname):
         if bname in self.buckets:
             _bucket = self.buckets[bucket]
         else:
@@ -167,7 +170,8 @@ class b2:
             robj = json.loads(r.text)
             raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
-    def b2DeleteFileVersion(self, fileName, fileId):
+    # b2_delete_file_version # b2DeleteFileVersion 
+    def deleteFileVersion(self, fileName, fileId):
         req = {
             'accountId':  self.session['accountId'],
             'fileName': fileName,
@@ -183,19 +187,10 @@ class b2:
             raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
 
-    # FIXME: https://www.backblaze.com/b2/docs/b2_download_file_by_id.html
-    # FIXME: https://www.backblaze.com/b2/docs/b2_download_file_by_name.html
-    # FIXME: https://www.backblaze.com/b2/docs/b2_get_file_info.html
-    # FIXME: https://www.backblaze.com/b2/docs/b2_hide_file.html  ## Never needed?
-    # FIXME: https://www.backblaze.com/b2/docs/b2_list_file_names.html
-    # FIXME: https://www.backblaze.com/b2/docs/b2_list_file_versions.html
-    # FIXME: https://www.backblaze.com/b2/docs/b2_update_bucket.html
-    #def b2GetFiles(self):  https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
-
-    # b2_get_upload_url
-    def b2GetUploadURL(self, bucket):
+    # b2_get_upload_url # b2GetUploadURL
+    def getUploadURL(self, bucket):
         if isinstance(bucket, str):
-            bucket = self.b2GetOrCreateBucket(bucket)
+            bucket = self.createBucket(bucket)
 
         req = { 'bucketId': bucket['bucketId'] }
         r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_url', verify=True, data = json.dumps(req))
@@ -204,8 +199,8 @@ class b2:
         else:
             raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
-    # b2_upload_file
-    def b2UploadIfNew(self, bucket, path):
+    # b2_upload_file # b2UploadIfNew
+    def uploadFile(self, bucket, path):
         info = digestparallel.digest(path)
         stats = os.stat(path)
         info['size'] = stats.st_size
@@ -214,7 +209,7 @@ class b2:
 
         _file = self.lookupFile(path, info)
         if _file is None:
-            bucket = self.b2GetUploadURL(bucket)
+            bucket = self.getUploadURL(bucket)
             headers = {
                 'Authorization': bucket['authorizationToken'],
                 'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
@@ -236,3 +231,52 @@ class b2:
                     return info
                 else:
                     raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
+
+
+    # b2_start_large_file
+    # b2_get_upload_part_url
+    # b2_upload_part
+    # b2_cancel_large_file
+    # b2_finish_large_file
+
+
+
+"""
+https://api.backblaze.com/b2api/v1/ with LargeFile (current as of 2016-07)
+
+b2 API wrappers will methods named in camelCase (medial capitals)
+
+*b2_authorize_account
+b2_cancel_large_file
+*b2_create_bucket
+*b2_delete_bucket
+*b2_delete_file_version
+b2_download_file_by_id
+b2_download_file_by_name
+b2_finish_large_file
+b2_get_file_info
+b2_get_upload_part_url
+*b2_get_upload_url
+b2_hide_file
+*b2_list_buckets
+b2_list_file_names
+b2_list_file_versions
+b2_list_parts
+b2_list_unfinished_large_files
+b2_start_large_file
+b2_update_bucket
+*b2_upload_file
+b2_upload_part
+
+https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
+
+https://www.backblaze.com/b2/docs/large_files.html
+
+Large files must be at least 100MB (100MB+1byte), have a part limit of 5GB, and a max size of 10TB.
+
+Parts start at 1 (Q: 0 is the whole file?)
+
+The sha1 checksum of each segment must be specified for that segment, an sha1 of the whole file is optional (recommended).
+
+
+"""
