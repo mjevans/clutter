@@ -10,13 +10,10 @@
 
 IO_BUFFER_SIZE = 65536
 
-#CONFIG_FILE = '.pyb2push'
-
-B2_AUTH_ID      = ''
-B2_AUTH_KEY     = ''
+CONFIG_FILE = '.pyb2push'
 
 import json
-import hashlib
+import digestparallel
 import os
 import sys
 import datetime
@@ -32,33 +29,19 @@ class b2:
     def __init__(self):
         self.s = requests.Session()
         self.buckets = {}
-
-    @staticmethod
-    def hashFile(sfile):
-        try:
-            with open(sfile, 'rb') as bfile:
-                hl_md5      = hashlib.md5()
-                hl_sha1     = hashlib.sha1()
-                hl_sha256   = hashlib.sha256()
-                hl_sha512   = hashlib.sha512()
-
-                while True:
-                    buf = bfile.read(IO_BUFFER_SIZE)
-                    if buf:
-                        hl_md5.update(buf)
-                        hl_sha1.update(buf)
-                        hl_sha256.update(buf)
-                        hl_sha512.update(buf)
-                    else:
-                        break
-
-                return {'md5':    hl_md5.hexdigest(),
-                        'sha1':   hl_sha1.hexdigest(),
-                        'sha256': hl_sha256.hexdigest(),
-                        'sha512': hl_sha512.hexdigest()}
-
-        except (Exception,) as e:
-            raise e
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                cfg = json.load(f)
+                self.b2id       = cfg['b2id']
+                self.b2key      = cfg['b2key']
+        elif os.path.exists(os.path.join('~/', CONFIG_FILE)):
+            with open(os.path.join('~/', CONFIG_FILE), 'r') as f:
+                cfg = json.load(f)
+                self.b2id       = cfg['b2id']
+                self.b2key      = cfg['b2key']
+        else:
+            self.b2id = None
+            self.b2key = None
 
     # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
 
@@ -75,6 +58,12 @@ class b2:
                         bucket_obj['bucketName'])), 'w') as f:
             json.dump(bucket_obj, f, indent=0, sort_keys=True)
 
+    def removeBucket(self, bucket_obj):
+        try:
+            os.unlink(os.path.join('buckets', '{}.json'.format(bucket_obj['bucketName']))
+        except (Exception, ) as e:
+            pass
+
     #@staticmethod
     def lookupFile(self, path, attr):
         fname = '{}.json'.format(path)
@@ -89,6 +78,12 @@ class b2:
                     'w') as f:
             json.dump(info, f, indent=0, sort_keys=True)
 
+    def removeFileNameId(self, fileName, fileId):
+        try:
+            os.unlink('{}.json'.format(fileName))
+        except (Exception, ) as e:
+            pass
+
     # an interface for bulk operations in other storage methods
     def storeBuckets(self, buckets):
         for bucket in buckets:
@@ -99,7 +94,9 @@ class b2:
             self.storeFile(path, attr, info)
 
     # b2_authorize_account
-    def b2Auth(self, _id = B2_AUTH_ID, _key = B2_AUTH_KEY):
+    def b2Auth(self, _id = None, _key = None):
+        if _id is None: _id = self.b2id
+        if _key is None: _key = self.b2key
         auth = requests.auth.HTTPBasicAuth(_id, _key)
         r = self.s.get('https://api.backblaze.com/b2api/v1/b2_authorize_account', verify=True, auth=auth)
         if 200 == r.status_code:
@@ -147,6 +144,52 @@ class b2:
         else:
             raise RuntimeError("(get)Bucket List Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
+    # If known, delete a bucket locally and remotely, returning the information object on success, returning None on the bucket not being known.
+    def b2DeleteBucketIfKnown(self, bname):
+        if bname in self.buckets:
+            _bucket = self.buckets[bucket]
+        else:
+            _bucket = self.lookupBucket(bname)
+        if _bucket is None:
+            return None
+
+        req = {
+            'accountId':  self.session['accountId'],
+            'bucketId': _bucket['bucketId']
+            }
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_delete_bucket', verify=True, data = json.dumps(req))
+        if 200 == r.status_code:
+            self.removeBucket(_bucket)
+            if bname in self.buckets:
+                del self.buckets[bname]
+            return _bucket
+        else:
+            robj = json.loads(r.text)
+            raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+
+    def b2DeleteFileVersion(self, fileName, fileId):
+        req = {
+            'accountId':  self.session['accountId'],
+            'fileName': fileName,
+            'fileId': fileId
+        }
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_delete_file_version', verify=True, data = json.dumps(req))
+        if 200 == r.status_code:
+            ref = json.loads(r.text)
+            self.removeFileNameId(ref['fileName'], ref['fileId'])
+            return ref
+        else:
+            robj = json.loads(r.text)
+            raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+
+
+    # FIXME: https://www.backblaze.com/b2/docs/b2_download_file_by_id.html
+    # FIXME: https://www.backblaze.com/b2/docs/b2_download_file_by_name.html
+    # FIXME: https://www.backblaze.com/b2/docs/b2_get_file_info.html
+    # FIXME: https://www.backblaze.com/b2/docs/b2_hide_file.html  ## Never needed?
+    # FIXME: https://www.backblaze.com/b2/docs/b2_list_file_names.html
+    # FIXME: https://www.backblaze.com/b2/docs/b2_list_file_versions.html
+    # FIXME: https://www.backblaze.com/b2/docs/b2_update_bucket.html
     #def b2GetFiles(self):  https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
 
     # b2_get_upload_url
@@ -163,7 +206,7 @@ class b2:
 
     # b2_upload_file
     def b2UploadIfNew(self, bucket, path):
-        info = self.hashFile(path)
+        info = digestparallel.digest(path)
         stats = os.stat(path)
         info['size'] = stats.st_size
         info['mtimens'] = stats.st_mtime_ns
