@@ -20,16 +20,44 @@ import requests
 import time
 
 
+class RangeLimiter(object):
+            def __init__(self, path, offset, limit):
+                self.fh = open(path, 'rb').seek(offset, 0)
+                self.sent = 0
+                self.limit = limit
+            
+            def __len__(self):
+                # super_len() will probe for supporting len(RangeLimiter()) (find st_size)
+                # https://github.com/kennethreitz/requests/blob/master/requests/utils.py
+                return self.limit
+            
+            def read(self, amount=-1): # Emulate RawIOBase
+                if self.limit == self.sent:
+                    return b''
+                elif self.limit > self.sent:
+                    raise IndexError()
+                else:
+                    if -1 == amount:
+                        amount = self.limit - self.sent
+                    else:
+                        amount = min(amount, self.limit - self.sent)
+                    buf = self.fh.read(amount)
+                    if buf:
+                        self.sent += len(buf)
+                    return buf
+
+
 class b2:
     s = None
     buckets = None
     session = None
     # dict: accountId, apiUrl, authorizationToken, downloadUrl
 
-    def __init__(self, b2id = None, b2key = None):
+    def __init__(self, b2id = None, b2key = None, verbose = 3):
         self.s = requests.Session()
         self.buckets = {}
         self.largeFileChunk = 4 * 1024 * 1024
+        self.verbose = verbose
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
@@ -57,15 +85,23 @@ class b2:
     def lookupBucket(self, bucket):
         fname = os.path.join('buckets', '{}.json'.format(bucket))
         if os.path.exists(fname):
+            if self.verbose >= 2:
+                print("lookupBucket: exists {}".format(fname), file=sys.stderr)
             return json.load(open(fname, 'r'))
+        if self.verbose >= 2:
+            print("lookupBucket: miss {}".format(fname), file=sys.stderr)
         return None
 
     def storeBucket(self, bucket_obj):
+        if self.verbose >= 2:
+            print("storeBucket: {}".format(bucket_obj['bucketName']), file=sys.stderr)
         with open(os.path.join('buckets', '{}.json'.format(
                         bucket_obj['bucketName'])), 'w') as f:
             json.dump(bucket_obj, f, indent=0, sort_keys=True)
 
     def removeBucket(self, bucket_obj):
+        if self.verbose >= 2:
+            print("removeBucket: {}".format(bucket_obj['bucketName']), file=sys.stderr)
         try:
             os.unlink(os.path.join('buckets', '{}.json'.format(bucket_obj['bucketName']))
         except (Exception, ) as e:
@@ -74,17 +110,25 @@ class b2:
     def lookupFile(self, path, attr):
         fname = '{}.json'.format(path)
         if os.path.exists(fname):
-            # FIXME: MAYBE: For the default 'on disk' implementation the attributes are presently ignored
+            # FIXME: MAYBE: For the default 'on disk' implementation the attributes are presently not compared FIXME?
+            if self.verbose >= 2:
+                print("lookupFile: exists {}.json".format(path), file=sys.stderr)
             return json.load(open(fname, 'r'))
+        if self.verbose >= 2:
+            print("lookupFile: miss {}.json".format(path), file=sys.stderr)
         return None
 
     def storeFile(self, path, attr, info):
+        if self.verbose >= 2:
+            print("storeFile: {}.json".format(path), file=sys.stderr)
         info.update(attr)
         with open('{}.json'.format(path),
                     'w') as f:
             json.dump(info, f, indent=0, sort_keys=True)
 
     def removeFileNameId(self, fileName, fileId):
+        if self.verbose >= 2:
+            print("removeFileNameId: {}.json".format(fileName), file=sys.stderr)
         try:
             os.unlink('{}.json'.format(fileName))
         except (Exception, ) as e:
@@ -104,8 +148,12 @@ class b2:
         tries = 3
         while tries > 0:
             tries -= 1
+            if self.verbose >= 1:
+                print("{} ::{} tries remain:: {}\n".format(path, tries, data), file=sys.stderr)
             try:
                 r = self.s.post(self.session['apiUrl'] + path, verify=True, data = json.dumps(data), timeout=35)
+                if self.verbose >= 1:
+                    print("{} :: result :: {}\n".format(path, r.text), file=sys.stderr)
                 if 200 == r.status_code:
                     return json.loads(r.text)
                 elif 401 == r.status_code:
@@ -147,9 +195,13 @@ class b2:
         tries = 3
         while tries > 0:
             tries -= 1
+            if self.verbose >= 1:
+                print("\n\nb2_authorize_account :: {} tries remain\n".format(tries), file=sys.stderr)
             try:
                 auth = requests.auth.HTTPBasicAuth(_id, _key)
                 r = self.s.get('https://api.backblaze.com/b2api/v1/b2_authorize_account', verify=True, auth=auth, timeout=35)
+                if self.verbose >= 1:
+                    print("{}\n\n".format(r.text), file=sys.stderr)
                 if 200 == r.status_code:
                     self.session = json.loads(r.text)
                     self.s.headers.update({'Authorization': self.session['authorizationToken']})
@@ -166,11 +218,15 @@ class b2:
     def createBucket(self, bucket):
         _bucket = None
         if bucket in self.buckets:
+            if self.verbose >= 1:
+                print("createBucket: cached: {}".format(bucket), file=sys.stderr)
             return self.buckets[bucket]
         else:
             _bucket = self.lookupBucket(bucket)
 
         if _bucket is None:
+            if self.verbose >= 1:
+                print("createBucket: create: {}".format(bucket), file=sys.stderr)
             req = {
                 'accountId':  self.session['accountId'],
                 'bucketName': bucket,
@@ -179,6 +235,9 @@ class b2:
             _bucket = self.postAsJSON('/b2api/v1/b2_create_bucket', req)
             self.storeBucket(_bucket)
             self.buckets[_bucket['bucketName']] = _bucket
+        else:
+            if self.verbose >= 1:
+                print("createBucket: lookup: {}".format(bucket), file=sys.stderr)
 
         return _bucket
 
@@ -246,6 +305,8 @@ class b2:
         if _file is None:
 
             if stats.st_size > self.largeFileChunk:
+                if self.verbose >= 1:
+                    print("uploadFile: Large {}/{}".format(bucket, path), file=sys.stderr)
                 bfile = self.startLargeFile(bucket, path, info)
                 info["fileId"] = bfile["fileId"]
                 info["uploaded"] = []
@@ -255,6 +316,8 @@ class b2:
                     tries = 3
                     while tries > 0:
                         tries -= 1
+                        if self.verbose >= 1:
+                            print("uploadPart: {} tries remain: {} of Large {}/{}".format(tries, s_part, bucket, path), file=sys.stderr)
                         try:
                             info["uploaded"].append(
                                 self.uploadPart(path, info, s_part, s_sha1, pfile = pfile)
@@ -269,7 +332,7 @@ class b2:
                 self.storeFile(path, bfile, info)
 
             else:
-            # Use classic single file method
+                # Use classic single file method
                 tries = 3
                 while tries > 0:
                     tries -= 1
@@ -290,7 +353,11 @@ class b2:
                         ups.headers.update(headers)
                         with open(path, 'rb') as f:
                             try:
+                                if self.verbose >= 1:
+                                    print("uploadFile: Normal {}/{}".format(bucket, path), file=sys.stderr)
                                 r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
+                                if self.verbose >= 2:
+                                    print("uploadFile: Normal {}/{} -> {}".format(bucket, path, r.text), file=sys.stderr)
                                 if 200 == r.status_code:
                                     bfile = json.loads(r.text)
                                     self.storeFile(path, bfile, info)
@@ -321,10 +388,6 @@ class b2:
 
 
     # b2_start_large_file
-    def startLargeFile(self, bucket, path):
-        self.uploadFile(bucket, path)
-
-    # b2_start_large_file
     def startLargeFile(self, bucket, path, info):
         if isinstance(bucket, str):
             bucket = self.createBucket(bucket)
@@ -349,7 +412,7 @@ class b2:
 
 
     # b2_upload_part
-    def uploadPart(self, info, s_part, s_sha1, pfile = None)
+    def uploadPart(self, path, info, s_part, s_sha1, pfile = None)
         if pfile is None:
             pfile = self.getUploadPartURL(info["fileId"])
         headers = {
@@ -363,36 +426,15 @@ class b2:
             }
         ups = requests.Session()
         ups.headers.update(headers)
-        class RangeLimiter(object):
-            def __init__(self, path, offset, limit):
-                self.fh = open(path, 'rb').seek(offset, 0)
-                self.sent = 0
-                self.limit = limit
-            
-            def __len__(self):
-                # super_len() will probe for supporting len(RangeLimiter()) (find st_size)
-                # https://github.com/kennethreitz/requests/blob/master/requests/utils.py
-                return self.limit
-            
-            def read(self, amount=-1): # Emulate RawIOBase
-                if self.limit == self.sent:
-                    return b''
-                elif self.limit > self.sent:
-                    raise IndexError()
-                else:
-                    if -1 == amount:
-                        amount = self.limit - self.sent
-                    else:
-                        amount = min(amount, self.limit - self.sent)
-                    buf = self.fh.read(amount)
-                    if buf:
-                        self.sent += len(buf)
-                    return buf
         with RangeLimiter(path,
                             s_part * self.largeFileChunk,
                             self.largeFileChunk) as f:
             try:
+                if self.verbose >= 1:
+                    print("uploadPart: {}/{}".format(bucket, path), file=sys.stderr)
                 r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
+                if self.verbose >= 2:
+                    print("uploadPart: {}/{} -> {}".format(bucket, path, r.text), file=sys.stderr)
                 if 200 == r.status_code:
                     return json.loads(r.text)
                 elif 401 == r.status_code:
@@ -470,7 +512,6 @@ The sha1 checksum of each segment must be specified for that segment, an sha1 of
 
 
 WIP TODO:
-* Read, apply https://www.backblaze.com/b2/docs/b2_start_large_file.html
 * Double-check existing work
 * Test live
 
