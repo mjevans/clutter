@@ -210,7 +210,13 @@ class b2:
 
         if stats.st_size > self.largeFileChunk:
             bfile = self.startLargeFile(bucket, path, info)
-            # You were here
+            info["fileId"] = bfile["fileId"]
+            info["uploaded"] = []
+            self.storeFile(path, bfile, info)
+            for s_part, s_sha1 in enumerate(info["sha1each"]):
+		self.uploadPart(path, info, s_part, s_sha1)
+	    finishLargeFile(bfile["fileId", info["sha1each"]):
+
         else:
             # Use classic single file method
             _file = self.lookupFile(path, info)
@@ -253,6 +259,7 @@ class b2:
                 'fileInfo': {
                     'src_last_modified_millis': int(info['mtimens'] / 1000.0),
                     'md5': info['md5'],
+		    'large_file_sha1': info['sha1'],
                     'sha256': info['sha256'],
                     'sha512': info['sha512']
                     }
@@ -265,16 +272,76 @@ class b2:
 
 
     # b2_get_upload_part_url
+    def getUploadPartURL(self, bucket, fileID)
+        if isinstance(bucket, str):
+            bucket = self.createBucket(bucket)
+
+        req = { 'bucketId': bucket['bucketId'] }
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_part_url', verify=True, data = json.dumps({"fileId": fileID}))
+        if 200 == r.status_code:
+            return json.loads(r.text)
+        else:
+            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
 
 
     # b2_upload_part
+    def uploadPart(self, info, s_part, s_sha1)
+	pfile = self.getUploadPartURL(info["fileId"])
+	headers = {
+	    'Authorization': pfile['authorizationToken'],
+	    'X-Bz-Part-Number': s_part + 1,
+	    'Contnet-Length': \
+		self.largeFileChunk \
+		if s_part + 1 < len(info["sha1each"]) else \
+		info["size"] % self.largeFileChunk,
+	    'X-Bz-Content-Sha1': s_sha1
+	    }
+	ups = requests.Session()
+	ups.headers.update(headers)
+	class RangeLimiter(object):
+	    def __init__(self, path, offset, limit):
+		self.fh = open(path, 'rb').seek(offset, 0)
+		self.sent = 0
+		self.limit = limit
+	    
+	    def read(self, amount=-1): # Emulate RawIOBase
+		if self.limit == self.sent:
+		    return b''
+		elif self.limit > self.sent:
+		    raise IndexError()
+		else:
+		    if -1 == amount:
+			amount = self.limit - self.sent
+		    else:
+			amount = min(amount, self.limit - self.sent)
+		    buf = self.fh.read(amount)
+		    if buf:
+			self.sent += len(buf)
+		    return buf
+	with RangeLimiter(path,
+			    s_part * self.largeFileChunk,
+			    self.largeFileChunk) as f:
+	    r = ups.post(pfile['uploadUrl'], data=f, )
+	    if 200 == r.status_code:
+		return json.loads(r.text)
+	    else:
+		raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
 
 
     # b2_cancel_large_file
 
 
     # b2_finish_large_file
-
+    def finishLargeFile(self, fileID, sha1each):
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_finish_large_file',
+			verify=True,
+			data = json.dumps({ "fileId": fileID,
+					    "partSha1Array": sha1each}))
+        if 200 == r.status_code:
+            return json.loads(r.text)
+        else:
+            raise RuntimeError("b2_finish_large_file URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+	
 
 
 
@@ -316,5 +383,10 @@ Parts start at 1 (Q: 0 is the whole file?)
 
 The sha1 checksum of each segment must be specified for that segment, an sha1 of the whole file is optional (recommended).
 
+
+WIP TODO:
+* Read, apply https://www.backblaze.com/b2/docs/b2_start_large_file.html
+* Double-check existing work
+* Test live
 
 """
