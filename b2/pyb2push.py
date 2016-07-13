@@ -28,6 +28,7 @@ class b2:
     def __init__(self):
         self.s = requests.Session()
         self.buckets = {}
+        self.largeFileChunk = 4 * 1024 * 1024
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 cfg = json.load(f)
@@ -201,43 +202,80 @@ class b2:
 
     # b2_upload_file # b2UploadIfNew
     def uploadFile(self, bucket, path):
-        info = digestparallel.digest(path)
+        info = digestparallel.digest(path, sha1each = self.largeFileChunk)
         stats = os.stat(path)
         info['size'] = stats.st_size
         info['mtimens'] = stats.st_mtime_ns
         info['ctimens'] = stats.st_ctime_ns
 
-        _file = self.lookupFile(path, info)
-        if _file is None:
-            bucket = self.getUploadURL(bucket)
-            headers = {
-                'Authorization': bucket['authorizationToken'],
-                'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
-                'Content-Type': 'b2/x-auto',
-                'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
-                'X-Bz-Content-Sha1': info['sha1'],
-                'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
-                'X-Bz-Info-md5': info['md5'],
-                'X-Bz-Info-sha256': info['sha256'],
-                'X-Bz-Info-sha512': info['sha512']
-            }
-            ups = requests.Session()
-            ups.headers.update(headers)
-            with open(path, 'rb') as f:
-                r = ups.post(bucket['uploadUrl'], data=f, )
-                if 200 == r.status_code:
-                    self.storeFile(path, json.loads(r.text), info)
-                    info.update(json.loads(r.text))
-                    return info
-                else:
-                    raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
-
+        if stats.st_size > self.largeFileChunk:
+            bfile = self.startLargeFile(bucket, path, info)
+            # You were here
+        else:
+            # Use classic single file method
+            _file = self.lookupFile(path, info)
+            if _file is None:
+                bfile = self.getUploadURL(bucket)
+                headers = {
+                    'Authorization': bfile['authorizationToken'],
+                    'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
+                    'Content-Type': 'b2/x-auto',
+                    'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
+                    'X-Bz-Content-Sha1': info['sha1'],
+                    'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
+                    'X-Bz-Info-md5': info['md5'],
+                    'X-Bz-Info-sha256': info['sha256'],
+                    'X-Bz-Info-sha512': info['sha512']
+                }
+                ups = requests.Session()
+                ups.headers.update(headers)
+                with open(path, 'rb') as f:
+                    r = ups.post(bfile['uploadUrl'], data=f, )
+                    if 200 == r.status_code:
+                        self.storeFile(path, json.loads(r.text), info)
+                        info.update(json.loads(r.text))
+                        return info
+                    else:
+                        raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
 
     # b2_start_large_file
+    def startLargeFile(self, bucket, path):
+        self.uploadFile(bucket, path)
+
+    # b2_start_large_file
+    def startLargeFile(self, bucket, path, info):
+        if isinstance(bucket, str):
+            bucket = self.createBucket(bucket)
+
+        req = { 'bucketId': bucket['bucketId'],
+                'fileName': path,
+                'Content-Type': 'b2/x-auto',
+                'fileInfo': {
+                    'src_last_modified_millis': int(info['mtimens'] / 1000.0),
+                    'md5': info['md5'],
+                    'sha256': info['sha256'],
+                    'sha512': info['sha512']
+                    }
+                }
+        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_start_large_file', verify=True, data = json.dumps(req))
+        if 200 == r.status_code:
+            return json.loads(r.text)
+        else:
+            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+
+
     # b2_get_upload_part_url
+
+
     # b2_upload_part
+
+
     # b2_cancel_large_file
+
+
     # b2_finish_large_file
+
+
 
 
 
@@ -272,7 +310,7 @@ https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, an
 
 https://www.backblaze.com/b2/docs/large_files.html
 
-Large files must be at least 100MB (100MB+1byte), have a part limit of 5GB, and a max size of 10TB.
+Large files must be at least 100MB (100MB+1byte), have a part limit of 5-billion-bytes, and a max size of 10TB (they mean billion bytes).
 
 Parts start at 1 (Q: 0 is the whole file?)
 

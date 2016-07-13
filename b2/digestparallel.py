@@ -13,7 +13,7 @@ from ctypes import c_char
 HASH_FILE_BUFFER_SIZE = 64*1024
 
 
-def digest(sfile, cmds = None):
+def digest(sfile, sha1each = 4 * 1024 * 1024, cmds = None):
     if cmds is None:
         cmds = []
     elif isinstance(cmds, str):
@@ -87,6 +87,11 @@ def digest(sfile, cmds = None):
         P_reader.start()
         Pp_reader.send("GO")
 
+        Pp_b2, Pc_b2 = Pipe()
+        I_b2 = 0
+        H_b2 = []
+        P_b2 = Process(target=mpw_sha1, args=(Pc_b2,))
+
         Pp_workers = [Pipe(), Pipe(), Pipe(), Pipe()]
         
         P_workers = {
@@ -101,6 +106,7 @@ def digest(sfile, cmds = None):
         
         for p in P_workers.values():
             p.start()
+        P_b2.start()
         
         while True:
             buf = Pp_reader.recv()
@@ -108,17 +114,37 @@ def digest(sfile, cmds = None):
                 break
 
             Pp_reader.send("GO")
-            for p, _ in Pp_workers:
-                p.send(buf)
-    
-            # We need to wait for -all- workers and the default ones are (probably) fastest to slowest anyway...
             
             for p, _ in Pp_workers:
-                assert "OK" == p.recv()
-                # raise RuntimeError("One of the worker threads got sick, the operation failed.")
+                p.send(buf)
+
+            t_b2 = I_b2
+            I_b2 = I_b2 + len(buf)
+            if t_b2 // sha1each != I_b2 // sha1each:
+                t_b2 = sha1each - (t_b2  % sha1each)
+                Pp_b2.send(buf[0:t_b2])
+                if "OK" != Pp_b2.recv():
+                    raise RuntimeError("Partial sha1each process got sick, the operation failed on chunk.")
+                Pp_b2.send(None)
+                H_b2.append(Pp_b2.recv())
+                P_b2 = Process(target=mpw_sha1, args=(Pc_b2,))
+                P_b2.start()
+                if t_b2 < HASH_FILE_BUFFER_SIZE:
+                    Pp_b2.send(buf[t_b2:])
+            else:
+                Pp_b2.send(buf)
+                if "OK" != Pp_b2.recv():
+                    raise RuntimeError("Partial sha1each process got sick, the operation failed.")
+
+            # We need to wait for -all- workers
+            for p, _ in Pp_workers:
+                if "OK" != p.recv():
+                    raise RuntimeError("One of the worker processes got sick, the operation failed.")
                 
+        Pp_b2.send(None)
         for p, _ in Pp_workers:
             p.send(None)
+        H_b2.append(Pp_b2.recv())
             
         # All workers MUST exit, the following hash workers MUST return a hexdigest string/bytestring
 
@@ -126,7 +152,8 @@ def digest(sfile, cmds = None):
         return {'md5':    Pp_workers[0][0].recv(),
                 'sha1':   Pp_workers[1][0].recv(),
                 'sha256': Pp_workers[2][0].recv(),
-                'sha512': Pp_workers[3][0].recv()}
+                'sha512': Pp_workers[3][0].recv(),
+                'sha1each': H_b2}
 
     except (Exception,) as e:
         raise e
