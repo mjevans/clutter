@@ -17,6 +17,7 @@ import sys
 import datetime
 import base64
 import requests
+import time
 
 
 class b2:
@@ -25,23 +26,31 @@ class b2:
     session = None
     # dict: accountId, apiUrl, authorizationToken, downloadUrl
 
-    def __init__(self):
+    def __init__(self, b2id = None, b2key = None):
         self.s = requests.Session()
         self.buckets = {}
         self.largeFileChunk = 4 * 1024 * 1024
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                cfg = json.load(f)
-                self.b2id       = cfg['b2id']
-                self.b2key      = cfg['b2key']
-        elif os.path.exists(os.path.join('~/', CONFIG_FILE)):
-            with open(os.path.join('~/', CONFIG_FILE), 'r') as f:
-                cfg = json.load(f)
-                self.b2id       = cfg['b2id']
-                self.b2key      = cfg['b2key']
-        else:
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    cfg = json.load(f)
+                    self.b2id       = cfg['b2id']
+                    self.b2key      = cfg['b2key']
+            elif os.path.exists(os.path.join('~/', CONFIG_FILE)):
+                with open(os.path.join('~/', CONFIG_FILE), 'r') as f:
+                    cfg = json.load(f)
+                    self.b2id       = cfg['b2id']
+                    self.b2key      = cfg['b2key']
+            else:
+                self.b2id = None
+                self.b2key = None
+        except (KeyError,) as e:
             self.b2id = None
             self.b2key = None
+
+        if b2id is not None and b2key is not None:
+            self.b2id = b2id
+            self.b2key = b2key
 
     # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
 
@@ -90,14 +99,42 @@ class b2:
         for path, attr, info in files:
             self.storeFile(path, attr, info)
 
-    def postJSON(self, path, data):
-	r = self.s.post(self.session['apiUrl'] + path,
-			verify=True,
-			data = data)
-        if 200 == r.status_code:
-            return json.loads(r.text)
-        else:
-            raise RuntimeError("POST {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
+    # On BlockingIOError abort operational state; optional: retry from base state
+    def postAsJSON(self, path, data):
+        tries = 3
+        while tries > 0:
+            tries -= 1
+            try:
+                r = self.s.post(self.session['apiUrl'] + path, verify=True, data = json.dumps(data), timeout=35)
+                if 200 == r.status_code:
+                    return json.loads(r.text)
+                elif 401 == r.status_code:
+                    time.sleep(15)
+                    self.authorizeAccount() # do not handle PermissionError
+                elif 403 == r.status_code:
+                    raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
+                elif (400 <= r.status_code and r.status_code <= 499):
+                    if path.find("_upload_"):
+                        raise BlockingIOError()
+                    else:
+                        robj = json.loads(r.text)
+                        if robj['code'] == 'duplicate_bucket_name':
+                            print(  "WARNING: Duplicate bucket creation attempted, is our database complete?\n"
+                                    "WARNING: Forcing enumeration of buckets.", file=sys.stderr)
+                            self.listBuckets()
+                            raise BlockingIOError()
+                elif (500 <= r.status_code and r.status_code <= 599):
+                    print("POST INFO {}: holding for 60 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
+                        path, tries, r.status_code, r.text), file=sys.stderr)
+                    time.sleep(60)
+                    self.authorizeAccount() # do not handle PermissionError
+                else:
+                    raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
+            except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                print("POST INFO {} ConnectionError holding for 60 seconds ({} tries remain)\t:: {}\n\n".format(
+                        path, tries, e.text()), file=sys.stderr)
+                time.sleep(60)
+                self.authorizeAccount() # do not handle PermissionError
 
 
 
@@ -107,13 +144,22 @@ class b2:
     def authorizeAccount(self, _id = None, _key = None):
         if _id is None: _id = self.b2id
         if _key is None: _key = self.b2key
-        auth = requests.auth.HTTPBasicAuth(_id, _key)
-        r = self.s.get('https://api.backblaze.com/b2api/v1/b2_authorize_account', verify=True, auth=auth)
-        if 200 == r.status_code:
-            self.session = json.loads(r.text)
-            self.s.headers.update({'Authorization': self.session['authorizationToken']})
-        else:
-            raise PermissionError("Unable to login to Backblaze B2: Status {}\n{}\n\n".format(r.status_code, r.text))
+        tries = 3
+        while tries > 0:
+            tries -= 1
+            try:
+                auth = requests.auth.HTTPBasicAuth(_id, _key)
+                r = self.s.get('https://api.backblaze.com/b2api/v1/b2_authorize_account', verify=True, auth=auth, timeout=35)
+                if 200 == r.status_code:
+                    self.session = json.loads(r.text)
+                    self.s.headers.update({'Authorization': self.session['authorizationToken']})
+                    break
+                elif 401 == r.status_code:
+                    raise PermissionError("Unable to login to Backblaze B2: Status {}\n{}\n\n".format(r.status_code, r.text))
+            except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                pass
+            print("AUTH INFO sleeping for 300 seconds ({} tries remain): {}: {}".format(tries, r.status_code, r.text))
+            time.sleep(300)
         return self.session
 
     # b2_create_bucket [A-Za-z0-9_-]{1,50}  # b2GetOrCreateBucket
@@ -130,30 +176,20 @@ class b2:
                 'bucketName': bucket,
                 'bucketType': 'allPrivate'
                 }
-            r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_create_bucket', verify=True, data = json.dumps(req))
-            if 200 == r.status_code:
-                _bucket = json.loads(r.text)
-            else:
-                robj = json.loads(r.text)
-                if robj['code'] == 'duplicate_bucket_name':
-                    print(  "WARNING: Duplicate bucket creation attempted, is our database complete?\n"
-                            "WARNING: Forcing enumeration of buckets.", file=sys.stderr)
-                    self.listBuckets()
-                    if bucket in self.buckets:
-                        return self.buckets[bucket]
-                raise RuntimeError("Bucket Create Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+            _bucket = self.postAsJSON('/b2api/v1/b2_create_bucket', req)
+            self.storeBucket(_bucket)
+            self.buckets[_bucket['bucketName']] = _bucket
 
-        self.storeBucket(_bucket)
-        self.buckets[_bucket['bucketName']] = _bucket
         return _bucket
 
     # b2_list_buckets # b2GetBuckets
     def listBuckets(self):
-        r = self.post(self.session['apiUrl'] + '/b2api/v1/b2_list_buckets', verify=True, data = json.dumps({'accountId': self.session['accountId']}))
-        if 200 == r.status_code:
-            self.storeBuckets(json.loads(r.text)['buckets'])
-        else:
-            raise RuntimeError("(get)Bucket List Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+        self.storeBuckets(
+            self.postAsJSON(
+                '/b2api/v1/b2_list_buckets',
+                {'accountId': self.session['accountId']}
+                )['buckets']
+            )
 
     # If known, delete a bucket locally and remotely, returning the information object on success, returning None on the bucket not being known.
     # b2_delete_bucket # b2DeleteBucketIfKnown
@@ -169,15 +205,14 @@ class b2:
             'accountId':  self.session['accountId'],
             'bucketId': _bucket['bucketId']
             }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_delete_bucket', verify=True, data = json.dumps(req))
-        if 200 == r.status_code:
-            self.removeBucket(_bucket)
-            if bname in self.buckets:
-                del self.buckets[bname]
-            return _bucket
-        else:
-            robj = json.loads(r.text)
-            raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+        
+        self.postAsJSON('/b2api/v1/b2_delete_bucket', req)
+        
+        self.removeBucket(_bucket)
+        if bname in self.buckets:
+            del self.buckets[bname]
+
+        return _bucket
 
     # b2_delete_file_version # b2DeleteFileVersion 
     def deleteFileVersion(self, fileName, fileId):
@@ -186,14 +221,9 @@ class b2:
             'fileName': fileName,
             'fileId': fileId
         }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_delete_file_version', verify=True, data = json.dumps(req))
-        if 200 == r.status_code:
-            ref = json.loads(r.text)
-            self.removeFileNameId(ref['fileName'], ref['fileId'])
-            return ref
-        else:
-            robj = json.loads(r.text)
-            raise RuntimeError("Bucket Delete Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+        ref self.postAsJSON('/b2api/v1/b2_delete_file_version', req)
+        self.removeFileNameId(ref['fileName'], ref['fileId'])
+        return ref
 
 
     # b2_get_upload_url # b2GetUploadURL
@@ -202,11 +232,7 @@ class b2:
             bucket = self.createBucket(bucket)
 
         req = { 'bucketId': bucket['bucketId'] }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_url', verify=True, data = json.dumps(req))
-        if 200 == r.status_code:
-            return json.loads(r.text)
-        else:
-            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+        return self.post('/b2api/v1/b2_get_upload_url', req)
 
     # b2_upload_file # b2UploadIfNew
     def uploadFile(self, bucket, path):
@@ -216,41 +242,76 @@ class b2:
         info['mtimens'] = stats.st_mtime_ns
         info['ctimens'] = stats.st_ctime_ns
 
-        if stats.st_size > self.largeFileChunk:
-            bfile = self.startLargeFile(bucket, path, info)
-            info["fileId"] = bfile["fileId"]
-            info["uploaded"] = []
-            self.storeFile(path, bfile, info)
-            for s_part, s_sha1 in enumerate(info["sha1each"]):
-		self.uploadPart(path, info, s_part, s_sha1)
-	    finishLargeFile(bfile["fileId", info["sha1each"]):
-
-        else:
-            # Use classic single file method
-            _file = self.lookupFile(path, info)
-            if _file is None:
-                bfile = self.getUploadURL(bucket)
-                headers = {
-                    'Authorization': bfile['authorizationToken'],
-                    'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
-                    'Content-Type': 'b2/x-auto',
-                    'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
-                    'X-Bz-Content-Sha1': info['sha1'],
-                    'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
-                    'X-Bz-Info-md5': info['md5'],
-                    'X-Bz-Info-sha256': info['sha256'],
-                    'X-Bz-Info-sha512': info['sha512']
-                }
-                ups = requests.Session()
-                ups.headers.update(headers)
-                with open(path, 'rb') as f:
-                    r = ups.post(bfile['uploadUrl'], data=f, )
-                    if 200 == r.status_code:
-                        self.storeFile(path, json.loads(r.text), info)
-                        info.update(json.loads(r.text))
-                        return info
+        _file = self.lookupFile(path, info)
+        if _file is None:
+            if stats.st_size > self.largeFileChunk:
+                bfile = self.startLargeFile(bucket, path, info)
+                info["fileId"] = bfile["fileId"]
+                info["uploaded"] = []
+                self.storeFile(path, bfile, info)
+                pfile = self.getUploadPartURL(info["fileId"])
+                for s_part, s_sha1 in enumerate(info["sha1each"]):
+                    tries = 3
+                    while tries > 0:
+                        tries -= 1
+                        try:
+                            self.uploadPart(path, info, s_part, s_sha1, pfile = pfile)
+                            break
+                        except (BlockingIOError), as e:
+                            pfile = self.getUploadPartURL(info["fileId"])
                     else:
-                        raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
+                        raise RuntimeError("ERROR: Tries exceeded while uploading large file part.")
+                finishLargeFile(bfile["fileId", info["sha1each"]):
+
+            else:
+            # Use classic single file method
+                tries = 3
+                while tries > 0:
+                    tries -= 1
+                    try:
+                        bfile = self.getUploadURL(bucket)
+                        headers = {
+                            'Authorization': bfile['authorizationToken'],
+                            'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
+                            'Content-Type': 'b2/x-auto',
+                            'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
+                            'X-Bz-Content-Sha1': info['sha1'],
+                            'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
+                            'X-Bz-Info-md5': info['md5'],
+                            'X-Bz-Info-sha256': info['sha256'],
+                            'X-Bz-Info-sha512': info['sha512']
+                        }
+                        ups = requests.Session()
+                        ups.headers.update(headers)
+                        with open(path, 'rb') as f:
+                            try:
+                                r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
+                                if 200 == r.status_code:
+                                    return json.loads(r.text)
+                                elif 401 == r.status_code:
+                                    time.sleep(15)
+                                    self.authorizeAccount() # do not handle PermissionError
+                                elif 403 == r.status_code:
+                                    raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
+                                elif (400 <= r.status_code and r.status_code <= 499):
+                                    raise BlockingIOError()
+                                elif (500 <= r.status_code and r.status_code <= 599):
+                                    print("POST INFO {}: holding for 60 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
+                                        path, tries, r.status_code, r.text), file=sys.stderr)
+                                    time.sleep(60)
+                                    self.authorizeAccount() # do not handle PermissionError
+                                    raise BlockingIOError()
+                                else:
+                                    raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
+                            except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                                print("POST INFO {} ConnectionError holding for 60 seconds ({} tries remain)\t:: {}\n\n".format(
+                                        path, tries, e.text()), file=sys.stderr)
+                                time.sleep(60)
+                                self.authorizeAccount() # do not handle PermissionError
+                                raise BlockingIOError()
+                    except (BlockingIOError,) as e:
+                        pass
+
 
     # b2_start_large_file
     def startLargeFile(self, bucket, path):
@@ -267,78 +328,88 @@ class b2:
                 'fileInfo': {
                     'src_last_modified_millis': int(info['mtimens'] / 1000.0),
                     'md5': info['md5'],
-		    'large_file_sha1': info['sha1'],
+                    'large_file_sha1': info['sha1'],
                     'sha256': info['sha256'],
                     'sha512': info['sha512']
                     }
                 }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_start_large_file', verify=True, data = json.dumps(req))
-        if 200 == r.status_code:
-            return json.loads(r.text)
-        else:
-            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+        return self.postAsJSON('/b2api/v1/b2_start_large_file', req)
 
 
     # b2_get_upload_part_url
-    def getUploadPartURL(self, bucket, fileID)
-        if isinstance(bucket, str):
-            bucket = self.createBucket(bucket)
-
-        req = { 'bucketId': bucket['bucketId'] }
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_get_upload_part_url', verify=True, data = json.dumps({"fileId": fileID}))
-        if 200 == r.status_code:
-            return json.loads(r.text)
-        else:
-            raise RuntimeError("Get Upload URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
+    def getUploadPartURL(self, fileID)
+        return self.postAsJSON('/b2api/v1/b2_get_upload_part_url', {"fileId": fileID})
 
 
     # b2_upload_part
-    def uploadPart(self, info, s_part, s_sha1)
-	pfile = self.getUploadPartURL(info["fileId"])
-	headers = {
-	    'Authorization': pfile['authorizationToken'],
-	    'X-Bz-Part-Number': s_part + 1,
-	    'Contnet-Length': \
-		self.largeFileChunk \
-		if s_part + 1 < len(info["sha1each"]) else \
-		info["size"] % self.largeFileChunk,
-	    'X-Bz-Content-Sha1': s_sha1
-	    }
-	ups = requests.Session()
-	ups.headers.update(headers)
-	class RangeLimiter(object):
-	    def __init__(self, path, offset, limit):
-		self.fh = open(path, 'rb').seek(offset, 0)
-		self.sent = 0
-		self.limit = limit
-	    
-	    def __len__(self):
-		# super_len() will probe for supporting len(RangeLimiter()) (find st_size)
-		# https://github.com/kennethreitz/requests/blob/master/requests/utils.py
-		return self.limit
-	    
-	    def read(self, amount=-1): # Emulate RawIOBase
-		if self.limit == self.sent:
-		    return b''
-		elif self.limit > self.sent:
-		    raise IndexError()
-		else:
-		    if -1 == amount:
-			amount = self.limit - self.sent
-		    else:
-			amount = min(amount, self.limit - self.sent)
-		    buf = self.fh.read(amount)
-		    if buf:
-			self.sent += len(buf)
-		    return buf
-	with RangeLimiter(path,
-			    s_part * self.largeFileChunk,
-			    self.largeFileChunk) as f:
-	    r = ups.post(pfile['uploadUrl'], data=f, )
-	    if 200 == r.status_code:
-		return json.loads(r.text)
-	    else:
-		raise RuntimeError("Upload Failure for {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
+    def uploadPart(self, info, s_part, s_sha1, pfile = None)
+        if pfile is None:
+            pfile = self.getUploadPartURL(info["fileId"])
+        headers = {
+            'Authorization': pfile['authorizationToken'],
+            'X-Bz-Part-Number': s_part + 1,
+            'Contnet-Length': \
+                self.largeFileChunk \
+                if s_part + 1 < len(info["sha1each"]) else \
+                info["size"] % self.largeFileChunk,
+            'X-Bz-Content-Sha1': s_sha1
+            }
+        ups = requests.Session()
+        ups.headers.update(headers)
+        class RangeLimiter(object):
+            def __init__(self, path, offset, limit):
+                self.fh = open(path, 'rb').seek(offset, 0)
+                self.sent = 0
+                self.limit = limit
+            
+            def __len__(self):
+                # super_len() will probe for supporting len(RangeLimiter()) (find st_size)
+                # https://github.com/kennethreitz/requests/blob/master/requests/utils.py
+                return self.limit
+            
+            def read(self, amount=-1): # Emulate RawIOBase
+                if self.limit == self.sent:
+                    return b''
+                elif self.limit > self.sent:
+                    raise IndexError()
+                else:
+                    if -1 == amount:
+                        amount = self.limit - self.sent
+                    else:
+                        amount = min(amount, self.limit - self.sent)
+                    buf = self.fh.read(amount)
+                    if buf:
+                        self.sent += len(buf)
+                    return buf
+        with RangeLimiter(path,
+                            s_part * self.largeFileChunk,
+                            self.largeFileChunk) as f:
+            try:
+                r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
+                if 200 == r.status_code:
+                    return json.loads(r.text)
+                elif 401 == r.status_code:
+                    time.sleep(15)
+                    self.authorizeAccount() # do not handle PermissionError
+                elif 403 == r.status_code:
+                    raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
+                elif (400 <= r.status_code and r.status_code <= 499):
+                    raise BlockingIOError()
+                elif (500 <= r.status_code and r.status_code <= 599):
+                    print("POST INFO {}: holding for 60 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
+                        path, tries, r.status_code, r.text), file=sys.stderr)
+                    time.sleep(60)
+                    self.authorizeAccount() # do not handle PermissionError
+                    raise BlockingIOError()
+                else:
+                    raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
+            except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                print("POST INFO {} ConnectionError holding for 60 seconds ({} tries remain)\t:: {}\n\n".format(
+                        path, tries, e.text()), file=sys.stderr)
+                time.sleep(60)
+                self.authorizeAccount() # do not handle PermissionError
+                raise BlockingIOError()
+
 
 
     # b2_cancel_large_file
@@ -346,15 +417,9 @@ class b2:
 
     # b2_finish_large_file
     def finishLargeFile(self, fileID, sha1each):
-        r = self.s.post(self.session['apiUrl'] + '/b2api/v1/b2_finish_large_file',
-			verify=True,
-			data = json.dumps({ "fileId": fileID,
-					    "partSha1Array": sha1each}))
-        if 200 == r.status_code:
-            return json.loads(r.text)
-        else:
-            raise RuntimeError("b2_finish_large_file URL Failure: Status {}\n{}\n\n".format(r.status_code, r.text))
-	
+        return self.postAsJSON('/b2api/v1/b2_finish_large_file',
+                                { "fileId": fileID, "partSha1Array": sha1each})
+        
 
 
 
@@ -373,7 +438,7 @@ b2_download_file_by_id
 b2_download_file_by_name
 b2_finish_large_file
 b2_get_file_info
-b2_get_upload_part_url
+*b2_get_upload_part_url
 *b2_get_upload_url
 b2_hide_file
 *b2_list_buckets
@@ -381,10 +446,10 @@ b2_list_file_names
 b2_list_file_versions
 b2_list_parts
 b2_list_unfinished_large_files
-b2_start_large_file
+*b2_start_large_file
 b2_update_bucket
 *b2_upload_file
-b2_upload_part
+*b2_upload_part
 
 https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
 
