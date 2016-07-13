@@ -244,6 +244,7 @@ class b2:
 
         _file = self.lookupFile(path, info)
         if _file is None:
+
             if stats.st_size > self.largeFileChunk:
                 bfile = self.startLargeFile(bucket, path, info)
                 info["fileId"] = bfile["fileId"]
@@ -255,13 +256,17 @@ class b2:
                     while tries > 0:
                         tries -= 1
                         try:
-                            self.uploadPart(path, info, s_part, s_sha1, pfile = pfile)
+                            info["uploaded"].append(
+                                self.uploadPart(path, info, s_part, s_sha1, pfile = pfile)
+                            )
+                            self.storeFile(path, bfile, info)
                             break
                         except (BlockingIOError), as e:
                             pfile = self.getUploadPartURL(info["fileId"])
                     else:
                         raise RuntimeError("ERROR: Tries exceeded while uploading large file part.")
-                finishLargeFile(bfile["fileId", info["sha1each"]):
+                bfile = finishLargeFile(bfile["fileId", info["sha1each"]):
+                self.storeFile(path, bfile, info)
 
             else:
             # Use classic single file method
@@ -287,7 +292,9 @@ class b2:
                             try:
                                 r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
                                 if 200 == r.status_code:
-                                    return json.loads(r.text)
+                                    bfile = json.loads(r.text)
+                                    self.storeFile(path, bfile, info)
+                                    return bfile
                                 elif 401 == r.status_code:
                                     time.sleep(15)
                                     self.authorizeAccount() # do not handle PermissionError
