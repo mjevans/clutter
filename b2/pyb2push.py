@@ -340,7 +340,7 @@ class b2:
                         bfile = self.getUploadURL(bucket)
                         headers = {
                             'Authorization': bfile['authorizationToken'],
-                            'X-Bz-File-Name': path, # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
+                            'X-Bz-File-Name': path.replace(os.sep, '/'), # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
                             'Content-Type': 'b2/x-auto',
                             'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
                             'X-Bz-Content-Sha1': info['sha1'],
@@ -393,7 +393,7 @@ class b2:
             bucket = self.createBucket(bucket)
 
         req = { 'bucketId': bucket['bucketId'],
-                'fileName': path,
+                'fileName': path.replace(os.sep, '/'),
                 'Content-Type': 'b2/x-auto',
                 'fileInfo': {
                     'src_last_modified_millis': int(info['mtimens'] / 1000.0),
@@ -470,6 +470,20 @@ class b2:
                                 { "fileId": fileID, "partSha1Array": sha1each})
         
 
+
+def simpleExample(bucket_files):
+    bb = b2()
+    cwd = os.getcwd()
+    if len(bucket_files) > 0:
+        bb.authorizeAccount()
+    for apath in bucket_files:
+        bucket, rpath = apath.split(os.sep, 2)
+        os.chdir(bucket)
+	if os.path.exists(rpath):
+            bb.uploadFile(bucket, rpath)
+
+if __name__ == "__main__":
+    def simpleExample(sys.argv)
 
 
 
