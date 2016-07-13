@@ -90,6 +90,14 @@ class b2:
         for path, attr, info in files:
             self.storeFile(path, attr, info)
 
+    def postJSON(self, path, data):
+	r = self.s.post(self.session['apiUrl'] + path,
+			verify=True,
+			data = data)
+        if 200 == r.status_code:
+            return json.loads(r.text)
+        else:
+            raise RuntimeError("POST {}: Status {}\n{}\n\n".format(path, r.status_code, r.text))
 
 
 
@@ -303,6 +311,11 @@ class b2:
 		self.fh = open(path, 'rb').seek(offset, 0)
 		self.sent = 0
 		self.limit = limit
+	    
+	    def __len__(self):
+		# super_len() will probe for supporting len(RangeLimiter()) (find st_size)
+		# https://github.com/kennethreitz/requests/blob/master/requests/utils.py
+		return self.limit
 	    
 	    def read(self, amount=-1): # Emulate RawIOBase
 		if self.limit == self.sent:
