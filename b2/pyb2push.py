@@ -18,20 +18,26 @@ import datetime
 import base64
 import requests
 import time
+import datetime
 
 
 class RangeLimiter(object):
             def __init__(self, path, offset, limit):
-                self.fh = open(path, 'rb')
+                self.fh = open(path, 'rb', buffering=1*1024*1024) # Try reading ahead in case the underlying device has issues.
                 self.fh.seek(offset, 0)
+                #self.fh = os.open(path, os.O_RDONLY|os.O_NONBLOCK)
+                #self.fh.lseek(self.fh, offset, os.SEEK_SET)
                 self.sent = 0
                 self.limit = limit
-            
+            def __exit__():
+                if self.fh is not None:
+                    os.close(self.fh)
+
             def __len__(self):
                 # super_len() will probe for supporting len(RangeLimiter()) (find st_size)
                 # https://github.com/kennethreitz/requests/blob/master/requests/utils.py
                 return self.limit
-            
+
             def read(self, amount=-1): # Emulate RawIOBase
                 if self.limit == self.sent:
                     return b''
@@ -42,7 +48,13 @@ class RangeLimiter(object):
                         amount = self.limit - self.sent
                     else:
                         amount = min(amount, self.limit - self.sent)
+                    #buf = os.read(self.fh, amount)
+                    t0 = time.perf_counter()
                     buf = self.fh.read(amount)
+                    t1 = time.perf_counter()
+                    if t1 - t0 > 1:
+                        print("WARNING: current read ({} @ {}) {} seconds for {} bytes!".format(amount, self.sent, t1 - t0, len(buf)), file=sys.stderr)
+                        sys.stderr.sync()
                     if buf:
                         self.sent += len(buf)
                     return buf
@@ -162,7 +174,7 @@ class b2:
         while tries > 0:
             tries -= 1
             if self.verbose >= 1:
-                print("{} ::{} tries remain:: {}\n".format(path, tries, data), file=sys.stderr)
+                print("{} ::{} tries remain:: {}\n\t{}\n\n".format(path, tries, datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), data), file=sys.stderr)
             try:
                 r = self.s.post(self.session['apiUrl'] + path, verify=True, data = json.dumps(data), timeout=35)
                 if self.verbose >= 1:
@@ -186,10 +198,13 @@ class b2:
                             self.listBuckets()
                             raise BlockingIOError()
                 elif (500 <= r.status_code and r.status_code <= 599):
-                    print("POST INFO {}: holding for 60 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
+                    print("POST INFO {}: holding for 900 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
                         path, tries, r.status_code, r.text), file=sys.stderr)
-                    time.sleep(60)
+                    sys.stderr.flush()
+                    time.sleep(900)
                     self.authorizeAccount() # do not handle PermissionError
+                    if 503 == r.status_code:
+                        raise BlockingIOError()
                 else:
                     raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
             except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
@@ -280,16 +295,16 @@ class b2:
             'accountId':  self.session['accountId'],
             'bucketId': _bucket['bucketId']
             }
-        
+
         self.postAsJSON('/b2api/v1/b2_delete_bucket', req)
-        
+
         self.removeBucket(_bucket)
         if bname in self.buckets:
             del self.buckets[bname]
 
         return _bucket
 
-    # b2_delete_file_version # b2DeleteFileVersion 
+    # b2_delete_file_version # b2DeleteFileVersion
     def deleteFileVersion(self, fileName, fileId):
         req = {
             'fileName': fileName,
@@ -333,10 +348,16 @@ class b2:
                 info["largeFileState"] = "Started"
                 info["fileId"] = bfile["fileId"]
                 self.storeFile(path, bfile, info)
+                if self.verbose >= 2:
+                    print("Started: {}/{} as {}".format(bucket, path, info["fileId"]),file=sys.stderr)
             elif "Complete" == info["largeFileState"]:
+                if self.verbose >= 1:
+                    print("File appears to be complete: {}/{} as {}".format(bucket, path, info["fileId"]), file=sys.stderr)
                 return None
             else:
                 bfile = info["largeFileObj"]
+                if self.verbose >= 2:
+                    print("Attempting to resume: {}/{} as {}".format(bucket, path, info["fileId"]), file=sys.stderr)
             skiplist = []
             if "uploaded" not in info:
                 info["uploaded"] = []
@@ -346,13 +367,14 @@ class b2:
             pfile = self.getUploadPartURL(info["fileId"])
             for s_part, s_sha1 in enumerate(info["sha1each"]):
                 if s_sha1 in skiplist:
-                    print("Skipping previously uploaded section {} :: {}".format(s_part, s_sha1))
+                    print("Skipping previously uploaded section {} :: {}".format(s_part, s_sha1), file=sys.stderr)
                     continue
                 tries = 3
                 while tries > 0:
                     tries -= 1
                     if self.verbose >= 1:
                         print("uploadPart: {} tries remain: {} of Large {}/{}".format(tries, s_part, bucket, path), file=sys.stderr)
+                        sys.stderr.flush()
                     try:
                         info["uploaded"].append(
                             self.uploadPart(path, info, s_part, s_sha1, pfile = pfile)
@@ -394,12 +416,15 @@ class b2:
                     with open(path, 'rb') as f:
                         try:
                             if self.verbose >= 1:
-                                print("uploadFile: Normal {}/{}".format(bucket, path), file=sys.stderr)
+                                print("uploadFile: Normal {} :: {}/{} :: {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path), file=sys.stderr)
+                                sys.stderr.flush()
                             r = ups.post(bfile["uploadUrl"], verify=True, data = f, timeout=None)
                             if self.verbose >= 2:
-                                print("uploadFile: Normal {}/{} -> {}".format(bucket, path, r.text), file=sys.stderr)
+                                print("uploadFile: Normal {} :: {}/{} -> {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path, r.text), file=sys.stderr)
                             if 200 == r.status_code:
                                 bfile = json.loads(r.text)
+                                if info['sha1'] != bfile["contentSha1"]:
+                                    raise BlockingIOError()
                                 self.storeFile(path, bfile, info)
                                 return bfile
                             elif 401 == r.status_code:
@@ -471,13 +496,16 @@ class b2:
                             self.largeFileChunk)
         try:
             if self.verbose >= 1:
-                print("uploadPart: {}".format(path), file=sys.stderr)
+                print("uploadPart: {} :: {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), path), file=sys.stderr)
                 sys.stderr.flush()
             r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
             if self.verbose >= 2:
-                print("uploadPart: {} -> {}".format(path, r.text), file=sys.stderr)
+                print("uploadPart: {} :: {} -> {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), path, r.text), file=sys.stderr)
+            robj = json.loads(r.text)
             if 200 == r.status_code:
-                return json.loads(r.text)
+                if s_sha1 != robj["contentSha1"]:
+                    raise BlockingIOError()
+                return robj
             elif 401 == r.status_code:
                 time.sleep(15)
                 self.authorizeAccount() # do not handle PermissionError
@@ -510,7 +538,7 @@ class b2:
     def finishLargeFile(self, fileID, sha1each):
         return self.postAsJSON('/b2api/v1/b2_finish_large_file',
                                 { "fileId": fileID, "partSha1Array": sha1each})
-        
+
 def simpleExample(bucket_files):
     bb = b2()
     cwd = os.getcwd()
