@@ -22,13 +22,21 @@ import datetime
 
 
 class RangeLimiter(object):
-            def __init__(self, path, offset, limit):
+            def __init__(self, path, offset, limit, notify = 100 * 1024 * 1024, verbose = 0, growingFileRace = False):
                 self.fh = open(path, 'rb', buffering=1*1024*1024) # Try reading ahead in case the underlying device has issues.
                 self.fh.seek(offset, 0)
+                self.offset = offset
                 #self.fh = os.open(path, os.O_RDONLY|os.O_NONBLOCK)
                 #self.fh.lseek(self.fh, offset, os.SEEK_SET)
                 self.sent = 0
-                self.limit = limit
+                self.progress = 1
+                self.path = path
+                self.notify = notify
+                self.verbose = verbose
+                if True == growingFileRace:
+                    self.limit = limit
+                else:
+                    self.limit = min(limit, os.fstat(self.fh.fileno()).st_size - offset)
             def __exit__():
                 if self.fh is not None:
                     os.close(self.fh)
@@ -52,11 +60,23 @@ class RangeLimiter(object):
                     t0 = time.perf_counter()
                     buf = self.fh.read(amount)
                     t1 = time.perf_counter()
-                    if t1 - t0 > 1:
-                        print("WARNING: current read ({} @ {}) {} seconds for {} bytes!".format(amount, self.sent, t1 - t0, len(buf)), file=sys.stderr)
-                        sys.stderr.sync()
                     if buf:
                         self.sent += len(buf)
+                    if self.verbose > 0 and self.progress != self.sent // self.notify:
+                        self.progress = self.sent // self.notify
+                        if self.verbose > 2:
+                            sys.stderr.write("\x1b[2J\x1b[H") # ANSI escape sequences: clear screen and move cursor
+                        print("INFO: {} local read {:.3f} ( {} / {} ) + {} {}".format(
+                                datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"),
+                                float(self.sent) / float(self.limit),
+                                self.sent,
+                                self.limit,
+                                self.offset,
+                                self.path), file=sys.stderr)
+                        sys.stderr.flush()
+                    if t1 - t0 > 1 or 0 == len(buf):
+                        print("WARNING: current read ({} @ {}) {} seconds for {} bytes!".format(amount, self.sent, t1 - t0, len(buf)), file=sys.stderr)
+                        sys.stderr.flush()
                     return buf
 
 
@@ -69,7 +89,9 @@ class b2:
     def __init__(self, b2id = None, b2key = None, verbose = 3, bucketDir = None):
         self.s = requests.Session()
         self.buckets = {}
-        self.largeFileChunk = 4 * 1024 * 1024 * 1024
+        self.minFileChunk =  100000000 # default B2 minimum; may be superceeded by b2_authorize_account
+        self.maxFileChunk = 5000000000 # default B2 maximum; may be superceeded by b2_authorize_account
+        self.largeFileChunk = 1 * 1024 * 1024 * 1024 # 512 * 1024 * 1024 # 4 * 1024 * 1024 * 1024
         self.verbose = verbose
         try:
             if os.path.exists(CONFIG_FILE):
@@ -236,6 +258,8 @@ class b2:
                 if 200 == r.status_code:
                     self.session = json.loads(r.text)
                     self.s.headers.update({'Authorization': self.session['authorizationToken']})
+                    if 'minimumPartSize' in self.session:
+                        self.minFileChunk = int(self.session['minimumPartSize'])
                     break
                 elif 401 == r.status_code:
                     raise PermissionError("Unable to login to Backblaze B2: Status {}\n{}\n\n".format(r.status_code, r.text))
@@ -330,16 +354,29 @@ class b2:
     # b2_upload_file # b2UploadIfNew
     def uploadFile(self, bucket, path, info = None):
         _file = self.lookupFile(path,None)
+        stats = os.stat(path)
         if _file is None:
-            info = digestparallel.digest(path, sha1each = self.largeFileChunk)
+            if   (stats.st_size % self.largeFileChunk >= self.minFileChunk and
+                  stats.st_size < self.largeFileChunk * 10000):
+                fileChunk = self.largeFileChunk
+            elif (stats.st_size % (self.largeFileChunk * 2) >= self.minFileChunk and
+                  stats.st_size < self.largeFileChunk * 2 * 10000 and
+                  (self.largeFileChunk * 2) <= self.maxFileChunk):
+                fileChunk = self.largeFileChunk * 2
+            elif stats.st_size / self.largeFileChunk < 10000:
+                fileChunk = self.largeFileChunk
+            else:
+                fileChunk = self.maxFileChunk
+            
+            info = digestparallel.digest(path, sha1each = fileChunk)
+            info['fileChunk'] = fileChunk
         else:
             info = _file
-        stats = os.stat(path)
         info['size'] = stats.st_size
         info['mtimens'] = stats.st_mtime_ns
         info['ctimens'] = stats.st_ctime_ns
 
-        if stats.st_size > self.largeFileChunk:
+        if stats.st_size > info['fileChunk']:
             if self.verbose >= 1:
                 print("uploadFile: Large {}/{}".format(bucket, path), file=sys.stderr)
             if "largeFileState" not in info:
@@ -492,8 +529,10 @@ class b2:
         ups = requests.Session()
         ups.headers.update(headers)
         f = RangeLimiter(path,
-                            s_part * self.largeFileChunk,
-                            self.largeFileChunk)
+                            s_part * info['fileChunk'],
+                            info['fileChunk'],
+                            notify = 20 * 1024 * 1024,
+                            verbose = 1)
         try:
             if self.verbose >= 1:
                 print("uploadPart: {} :: {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), path), file=sys.stderr)
@@ -546,6 +585,7 @@ def simpleExample(bucket_files):
         #pass
         #print("Attempting to authorizeAccount", file=sys.stderr)
         bb.authorizeAccount()
+    #bb.cancelLargeFile("")
     for apath in bucket_files:
         bucket, rpath = os.path.relpath(apath, start=cwd).split(os.sep, 1)
         os.chdir(bucket)
