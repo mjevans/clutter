@@ -359,10 +359,6 @@ class b2:
             if   (stats.st_size % self.largeFileChunk >= self.minFileChunk and
                   stats.st_size < self.largeFileChunk * 10000):
                 fileChunk = self.largeFileChunk
-            elif (stats.st_size % (self.largeFileChunk * 2) >= self.minFileChunk and
-                  stats.st_size < self.largeFileChunk * 2 * 10000 and
-                  (self.largeFileChunk * 2) <= self.maxFileChunk):
-                fileChunk = self.largeFileChunk * 2
             elif stats.st_size / self.largeFileChunk < 10000:
                 fileChunk = self.largeFileChunk
             else:
