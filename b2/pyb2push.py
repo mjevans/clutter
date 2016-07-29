@@ -129,13 +129,13 @@ class b2:
 
         if (self.bucketDir is not None and not os.path.isdir(self.bucketDir)):
             os.makedirs(self.bucketDir)
-            
+
 
         if authorizeNow:
             self.session = self.authorizeAccount()
 
 
-    # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
+    # These were staticmethods but are now class methods in case derived classes use class state (E.G. a database connection)
 
     def lookupBucket(self, bucket):
         fname = os.path.join(self.bucketDir, '{}.json'.format(bucket))
@@ -203,7 +203,7 @@ class b2:
         if self.verbose >= 1:
             print("postAsJSON :: {}\n".format(jdata), file=sys.stderr)
         self.postB2(self.session['apiUrl'] + path, jdata, timeout = 35)
-        
+
     # On BlockingIOError abort operational state; optional: retry from base state
     def postB2(self, postUrl, data, timeout = None, tries = 5, retryDefault = None):
         if timeout is None:
@@ -224,13 +224,16 @@ class b2:
                 if self.verbose >= 1:
                     print("{} :: result :: {}\n\n{}\n".format(path, r.text, r.headers), file=sys.stderr)
                     sys.stderr.flush()
+
+                if 200 == r.status_code:
+                    return json.loads(r.text)
+
                 if 'Retry-After' in r.headers:
                     retry = float(r.headers['Retry-After'])
                 else:
                     retry *= 2
-                if 200 == r.status_code:
-                    return json.loads(r.text)
-                elif 401 == r.status_code:
+
+                if 401 == r.status_code:
                     time.sleep(retry)
                     self.authorizeAccount() # do not handle PermissionError
                 elif 403 == r.status_code:
@@ -265,6 +268,8 @@ class b2:
                 sys.stderr.flush()
                 time.sleep(retry)
                 ## self.authorizeAccount() # do not handle PermissionError
+
+	    raise BlockingIOError() # Out of attempts.
 
 
 
@@ -393,7 +398,7 @@ class b2:
                 fileChunk = self.largeFileChunk
             else:
                 fileChunk = self.maxFileChunk
-            
+
             info = digestparallel.digest(path, sha1each = fileChunk)
             info['fileChunk'] = fileChunk
         else:
@@ -631,13 +636,13 @@ https://api.backblaze.com/b2api/v1/ with LargeFile (current as of 2016-07)
 b2 API wrappers will methods named in camelCase (medial capitals)
 
 *b2_authorize_account
-b2_cancel_large_file
+*b2_cancel_large_file
 *b2_create_bucket
 *b2_delete_bucket
 *b2_delete_file_version
 b2_download_file_by_id
 b2_download_file_by_name
-b2_finish_large_file
+*b2_finish_large_file
 b2_get_file_info
 *b2_get_upload_part_url
 *b2_get_upload_url
@@ -661,5 +666,9 @@ Large files must be at least 100MB (100MB+1byte), have a part limit of 5-billion
 Parts start at 1 (Q: 0 is the whole file?)
 
 The sha1 checksum of each segment must be specified for that segment, an sha1 of the whole file is optional (recommended).
+
+sed -i 's/^[[:space:]]\+$//'
+sed -i 's/[[:space:]]\+$//'
+
 
 """

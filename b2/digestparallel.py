@@ -20,7 +20,7 @@ def digest(sfile, sha1each = 4 * 1024 * 1024, cmds = None):
         cmds = [cmds]
 
     # processes
-        
+
     def mpw_reader(p, sfile):
         with open(sfile, 'rb') as bfile:
             while True:
@@ -93,28 +93,28 @@ def digest(sfile, sha1each = 4 * 1024 * 1024, cmds = None):
         P_b2 = Process(target=mpw_sha1, args=(Pc_b2,))
 
         Pp_workers = [Pipe(), Pipe(), Pipe(), Pipe()]
-        
+
         P_workers = {
             "md5":    Process(target=mpw_md5,    args=(Pp_workers[0][1],)),
             "sha1":   Process(target=mpw_sha1,   args=(Pp_workers[1][1],)),
             "sha256": Process(target=mpw_sha256, args=(Pp_workers[2][1],)),
             "sha512": Process(target=mpw_sha512, args=(Pp_workers[3][1],))
             }
-        
+
         for c in cmds:
             pass
-        
+
         for p in P_workers.values():
             p.start()
         P_b2.start()
-        
+
         while True:
             buf = Pp_reader.recv()
             if buf is None:
                 break
 
             Pp_reader.send("GO")
-            
+
             for p, _ in Pp_workers:
                 p.send(buf)
 
@@ -140,15 +140,15 @@ def digest(sfile, sha1each = 4 * 1024 * 1024, cmds = None):
             for p, _ in Pp_workers:
                 if "OK" != p.recv():
                     raise RuntimeError("One of the worker processes got sick, the operation failed.")
-                
+
         Pp_b2.send(None)
         for p, _ in Pp_workers:
             p.send(None)
         H_b2.append(Pp_b2.recv())
-            
+
         # All workers MUST exit, the following hash workers MUST return a hexdigest string/bytestring
 
-        
+
         return {'md5':    Pp_workers[0][0].recv(),
                 'sha1':   Pp_workers[1][0].recv(),
                 'sha256': Pp_workers[2][0].recv(),
