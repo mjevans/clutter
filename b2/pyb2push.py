@@ -79,6 +79,12 @@ class RangeLimiter(object):
                         sys.stderr.flush()
                     return buf
 
+class StatefulException(Exception):
+    def __init__(self, value = ""):
+	self.value = value
+    def __str(self):
+	return repr(self.value)
+
 
 class b2:
     session = None
@@ -205,7 +211,9 @@ class b2:
         self.postB2(self.session['apiUrl'] + path, jdata, timeout = 35)
 
     # On BlockingIOError abort operational state; optional: retry from base state
-    def postB2(self, postUrl, data, timeout = None, tries = 5, retryDefault = None):
+    def postB2(self, postUrl, data, session = None, stateful = False, timeout = None, tries = 5, retryDefault = None):
+	if session is None:
+	    session = self.s
         if timeout is None:
             timeout = self.timeout
         if tries is None:
@@ -220,7 +228,7 @@ class b2:
             if self.verbose >= 1:
                 print("{} :: {} tries remain:: {}\n".format(path, tries, datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f")), file=sys.stderr)
             try:
-                r = self.s.post(self.session['apiUrl'] + path, verify=True, data=data, timeout=timeout)
+                r = session.post(postUrl, verify=True, data=data, timeout=timeout)
                 if self.verbose >= 1:
                     print("{} :: result :: {}\n\n{}\n".format(path, r.text, r.headers), file=sys.stderr)
                     sys.stderr.flush()
@@ -236,6 +244,8 @@ class b2:
                 if 401 == r.status_code:
                     time.sleep(retry)
                     self.authorizeAccount() # do not handle PermissionError
+                    if stateful:
+                        raise StatefulException("Authorization expired during upload; the upload will have to be setup again. :: {}".format(r.text))
                 elif 403 == r.status_code:
                     raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
                 elif 429 == r.status_code:
@@ -243,23 +253,27 @@ class b2:
                     sys.stderr.flush()
                     sleep(retry)
                 elif (400 <= r.status_code and r.status_code <= 499):
-                    if path.find("_upload_"):
-                        raise BlockingIOError()
+                    if stateful:
+                        raise StatefulException("Upload issue unrelated to account authorization, set it up again.")
                     else:
                         robj = json.loads(r.text)
-                        if robj['code'] == 'duplicate_bucket_name':
+                        if 'duplicate_bucket_name' == robj['code']:
                             print(  "WARNING: Duplicate bucket creation attempted, is our database complete?\n"
                                     "WARNING: Forcing enumeration of buckets.", file=sys.stderr)
                             self.listBuckets()
                             raise BlockingIOError()
+			elif 'bad_request' == robj['code']:
+			    raise BlockingIOError()
+			elif 'file_not_present' == robj['code']
+			    return robj
                 elif (500 <= r.status_code and r.status_code <= 599):
                     print("POST INFO {}: holding for 900 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
                         path, tries, r.status_code, r.text), file=sys.stderr)
                     sys.stderr.flush()
                     time.sleep(900)
                     self.authorizeAccount() # do not handle PermissionError
-                    if 503 == r.status_code:
-                        raise BlockingIOError()
+                    if stateful:
+                        raise StatefulException("Internal server error during upload.  Defaulting to resetting client state (including authorization); the upload will have to be setup again. :: {}".format(r.text))
                 else:
                     raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
             except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
@@ -369,11 +383,7 @@ class b2:
             'fileName': fileName,
             'fileId': fileId
         }
-        try:
-            ref = self.postAsJSON('/b2api/v1/b2_delete_file_version', req)
-        except (BlockingIOError,) as e:
-            if "file_not_present" != ref["code"]:
-                raise e
+	ref = self.postAsJSON('/b2api/v1/b2_delete_file_version', req)
         self.removeFileNameId(ref['fileName'], ref['fileId'])
         return ref
 
@@ -451,7 +461,7 @@ class b2:
                         info["largeFileState"] = str(len(skiplist))
                         self.storeFile(path, bfile, info)
                         break
-                    except (BlockingIOError,) as e:
+                    except (StatefulException, ) as e:
                         pfile = self.getUploadPartURL(info["fileId"])
                 else:
                     raise RuntimeError("ERROR: Tries exceeded while uploading large file part.")
@@ -463,61 +473,30 @@ class b2:
             # Use classic single file method
             if _file:
                 return None
-            tries = 3
-            while tries > 0:
-                tries -= 1
-                try:
-                    bfile = self.getUploadURL(bucket)
-                    headers = {
-                        'Authorization': bfile['authorizationToken'],
-                        'X-Bz-File-Name': path.replace(os.sep, '/'), # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
-                        'Content-Type': 'b2/x-auto',
-                        'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
-                        'X-Bz-Content-Sha1': info['sha1'],
-                        'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
-                        'X-Bz-Info-md5': info['md5'],
-                        'X-Bz-Info-sha256': info['sha256'],
-                        'X-Bz-Info-sha512': info['sha512']
-                    }
-                    ups = requests.Session()
-                    ups.headers.update(headers)
-                    with open(path, 'rb') as f:
-                        try:
-                            if self.verbose >= 1:
-                                print("uploadFile: Normal {} :: {}/{}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path), file=sys.stderr)
-                                sys.stderr.flush()
-                            r = ups.post(bfile["uploadUrl"], verify=True, data = f, timeout=None)
-                            if self.verbose >= 2:
-                                print("uploadFile: Normal {} :: {}/{} -> {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path, r.text), file=sys.stderr)
-                            if 200 == r.status_code:
-                                bfile = json.loads(r.text)
-                                if info['sha1'] != bfile["contentSha1"]:
-                                    raise BlockingIOError()
-                                self.storeFile(path, bfile, info)
-                                return bfile
-                            elif 401 == r.status_code:
-                                time.sleep(15)
-                                self.authorizeAccount() # do not handle PermissionError
-                            elif 403 == r.status_code:
-                                raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
-                            elif (400 <= r.status_code and r.status_code <= 499):
-                                raise BlockingIOError()
-                            elif (500 <= r.status_code and r.status_code <= 599):
-                                print("POST INFO {}: holding for 60 seconds ({} tries remain)\n\tStatus {}: {}\n\n".format(
-                                    path, tries, r.status_code, r.text), file=sys.stderr)
-                                time.sleep(60)
-                                self.authorizeAccount() # do not handle PermissionError
-                                raise BlockingIOError()
-                            else:
-                                raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
-                        except (ConnectionError, ConnectionResetError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-                            print("POST INFO {} ConnectionError holding for 60 seconds ({} tries remain)\t:: {}\n\n".format(
-                                    path, tries, e), file=sys.stderr)
-                            time.sleep(60)
-                            self.authorizeAccount() # do not handle PermissionError
-                            raise BlockingIOError()
-                except (BlockingIOError,) as e:
-                    pass
+            while True:
+		bfile = self.getUploadURL(bucket)
+		headers = {
+		    'Authorization': bfile['authorizationToken'],
+		    'X-Bz-File-Name': path.replace(os.sep, '/'), # ??? https://www.backblaze.com/b2/docs/string_encoding.html ??? Python should work by default?
+		    'Content-Type': 'b2/x-auto',
+		    'Contnet-Length': info['size'],  # 'requests' MIGHT update this... but we already have it and that was /might/
+		    'X-Bz-Content-Sha1': info['sha1'],
+		    'X-Bz-Info-src_last_modified_millis': int(info['mtimens'] / 1000.0),
+		    'X-Bz-Info-md5': info['md5'],
+		    'X-Bz-Info-sha256': info['sha256'],
+		    'X-Bz-Info-sha512': info['sha512']
+		}
+		ups = requests.Session()
+		ups.headers.update(headers)
+		with open(path, 'rb') as f:
+		    try:
+			bfile = postB2(bfile["uploadUrl"], f, session = ups, stateful = True, timeout = None)
+			if info['sha1'] != bfile["contentSha1"]:
+			    raise BlockingIOError()
+			self.storeFile(path, bfile, info)
+			return bfile
+		    except (StatefulException,) as e:
+			pass
 
 
     # b2_start_large_file
@@ -564,41 +543,12 @@ class b2:
                             info['fileChunk'],
                             notify = 20 * 1024 * 1024,
                             verbose = 1)
-        try:
-            if self.verbose >= 1:
-                print("uploadPart: {} :: {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), path), file=sys.stderr)
-                sys.stderr.flush()
-            r = ups.post(pfile["uploadUrl"], verify=True, data = f, timeout=None)
-            if self.verbose >= 2:
-                print("uploadPart: {} :: {} -> {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), path, r.text), file=sys.stderr)
-            robj = json.loads(r.text)
-            if 200 == r.status_code:
-                if s_sha1 != robj["contentSha1"]:
-                    raise BlockingIOError()
-                return robj
-            elif 401 == r.status_code:
-                time.sleep(15)
-                self.authorizeAccount() # do not handle PermissionError
-            elif 403 == r.status_code:
-                raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
-            elif (400 <= r.status_code and r.status_code <= 499):
-                raise BlockingIOError()
-            elif (500 <= r.status_code and r.status_code <= 599):
-                print("POST INFO {}: holding for 60 seconds\n\tStatus {}: {}\n\n".format(
-                    path, r.status_code, r.text), file=sys.stderr)
-                time.sleep(60)
-                self.authorizeAccount() # do not handle PermissionError
-                raise BlockingIOError()
-            else:
-                raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
-        except (ConnectionError, ConnectionResetError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-            print("POST INFO {} ConnectionError holding for 60 seconds\t:: {}\n\n".format(
-                    path, e), file=sys.stderr)
-            time.sleep(60)
-            self.authorizeAccount() # do not handle PermissionError
-            raise BlockingIOError()
-
-
+			# On BlockingIOError abort operational state; optional: retry from base state
+			def postB2(self, postUrl, data, session = None, timeout = None, tries = 5, retryDefault = None):
+	robj = postB2(pfile["uploadUrl"], f, session = ups, stateful = True, timeout = None)
+	if s_sha1 != robj["contentSha1"]:
+	    raise BlockingIOError()
+	return robj
 
     # b2_cancel_large_file
     def cancelLargeFile(self, fileID):
