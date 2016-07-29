@@ -420,7 +420,7 @@ class b2:
                         pfile = self.getUploadPartURL(info["fileId"])
                 else:
                     raise RuntimeError("ERROR: Tries exceeded while uploading large file part.")
-            bfile = finishLargeFile(bfile["fileId"], skiplist)
+            bfile = self.finishLargeFile(bfile["fileId"], info["sha1each"])
             info["largeFileState"] = "Complete"
             return self.storeFile(path, bfile, info)
 
@@ -449,7 +449,7 @@ class b2:
                     with open(path, 'rb') as f:
                         try:
                             if self.verbose >= 1:
-                                print("uploadFile: Normal {} :: {}/{} :: {}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path), file=sys.stderr)
+                                print("uploadFile: Normal {} :: {}/{}".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), bucket, path), file=sys.stderr)
                                 sys.stderr.flush()
                             r = ups.post(bfile["uploadUrl"], verify=True, data = f, timeout=None)
                             if self.verbose >= 2:
