@@ -81,51 +81,59 @@ class RangeLimiter(object):
 
 
 class b2:
-    s = None
-    buckets = None
     session = None
     # dict: accountId, apiUrl, authorizationToken, downloadUrl
 
-    def __init__(self, b2id = None, b2key = None, verbose = 3, bucketDir = None):
-        self.s = requests.Session()
-        self.buckets = {}
+    def __init__(self, authorizeNow = True, **overrides):
+        # defaults
+        self.b2id = None
+        self.b2key = None
+        self.authUrl = 'https://api.backblaze.com/b2api/v1/b2_authorize_account'
+        self.bucketDir = os.path.join(os.getcwd(), 'buckets')
+        self.largeFileChunk = 1 * 1024 * 1024 * 1024 # 512 * 1024 * 1024 # 4 * 1024 * 1024 * 1024
         self.minFileChunk =  100000000 # default B2 minimum; may be superceeded by b2_authorize_account
         self.maxFileChunk = 5000000000 # default B2 maximum; may be superceeded by b2_authorize_account
-        self.largeFileChunk = 1 * 1024 * 1024 * 1024 # 512 * 1024 * 1024 # 4 * 1024 * 1024 * 1024
-        self.verbose = verbose
+        self.retryDefault = 8 # seconds, default for start of exponential backoff.
+        self.timeout = 35
+        self.triesDefault = 5
+        self.verbose = 3
+
+        # resources
+        self.s = requests.Session()
+        self.buckets = {}
+
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
                     print("Loaded b2id and b2key from local {}".format(CONFIG_FILE), file=sys.stderr)
                     cfg = json.load(f)
-                    self.b2id       = cfg['b2id']
-                    self.b2key      = cfg['b2key']
+                    for k, v in crg.iter():
+                        if k in self.__dict__:
+                            setattr(self, k, v)
             elif os.path.exists(os.path.join(os.path.expanduser('~'), CONFIG_FILE)):
                 with open(os.path.join(os.path.expanduser('~'), CONFIG_FILE), 'r') as f:
                     print("Loaded b2id and b2key from local ~/{}".format(CONFIG_FILE), file=sys.stderr)
                     cfg = json.load(f)
-                    self.b2id       = cfg['b2id']
-                    self.b2key      = cfg['b2key']
+                    for k, v in crg.iter():
+                        if k in self.__dict__:
+                            setattr(self, k, v)
             else:
-                self.b2id = None
-                self.b2key = None
                 print("b2 authorization not provided", file=sys.stderr)
         except (KeyError,) as e:
-            self.b2id = None
-            self.b2key = None
             print("b2 auth load failed {}".format(e), file=sys.stderr)
 
-        if bucketDir is not None:
-            self.bucketDir = bucketDir
-        else:
-            self.bucketDir = os.path.join(os.getcwd(), 'buckets')
-        if not os.path.isdir(self.bucketDir):
-            os.makedirs(self.bucketDir)
 
-        if b2id is not None and b2key is not None:
-            self.b2id = b2id
-            self.b2key = b2key
-            print("Override b2id and b2key from constructor args", file=sys.stderr)
+        for k, v in overrides.iter():
+            setattr(self, k, v)
+
+
+        if (self.bucketDir is not None and not os.path.isdir(self.bucketDir)):
+            os.makedirs(self.bucketDir)
+            
+
+        if authorizeNow:
+            self.session = self.authorizeAccount()
+
 
     # These staticmethods are promoted to class methods in case derived classes use class state (E.G. a database connection)
 
@@ -190,25 +198,47 @@ class b2:
         for path, attr, info in files:
             self.storeFile(path, attr, info)
 
-    # On BlockingIOError abort operational state; optional: retry from base state
     def postAsJSON(self, path, data):
-        tries = 3
+        jdata = json.dumps(data)
+        if self.verbose >= 1:
+            print("postAsJSON :: {}\n".format(jdata), file=sys.stderr)
+        self.postB2(self.session['apiUrl'] + path, jdata, timeout = 35)
+        
+    # On BlockingIOError abort operational state; optional: retry from base state
+    def postB2(self, postUrl, data, timeout = None, tries = 5, retryDefault = None):
+        if timeout is None:
+            timeout = self.timeout
+        if tries is None:
+            tries = self.triesDefault
+        if retryDefault is None:
+            retry = self.retryDefault
+        else:
+            retry = retryDefault
+
         while tries > 0:
             tries -= 1
             if self.verbose >= 1:
-                print("{} ::{} tries remain:: {}\n\t{}\n\n".format(path, tries, datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f"), data), file=sys.stderr)
+                print("{} :: {} tries remain:: {}\n".format(path, tries, datetime.datetime.now().strftime("%Y%m%d-%H%M%S.%f")), file=sys.stderr)
             try:
-                r = self.s.post(self.session['apiUrl'] + path, verify=True, data = json.dumps(data), timeout=35)
+                r = self.s.post(self.session['apiUrl'] + path, verify=True, data=data, timeout=timeout)
                 if self.verbose >= 1:
-                    print("{} :: result :: {}\n".format(path, r.text), file=sys.stderr)
+                    print("{} :: result :: {}\n\n{}\n".format(path, r.text, r.headers), file=sys.stderr)
                     sys.stderr.flush()
+                if 'Retry-After' in r.headers:
+                    retry = float(r.headers['Retry-After'])
+                else:
+                    retry *= 2
                 if 200 == r.status_code:
                     return json.loads(r.text)
                 elif 401 == r.status_code:
-                    time.sleep(15)
+                    time.sleep(retry)
                     self.authorizeAccount() # do not handle PermissionError
                 elif 403 == r.status_code:
                     raise RuntimeError("CRITICAL: User review required: {} : {}".format(r.status_code, r.text))
+                elif 429 == r.status_code:
+                    print("BB 429 Too Many Requests, sleeping for {} seconds".format(retry), file=sys.stderr)
+                    sys.stderr.flush()
+                    sleep(retry)
                 elif (400 <= r.status_code and r.status_code <= 499):
                     if path.find("_upload_"):
                         raise BlockingIOError()
@@ -230,11 +260,11 @@ class b2:
                 else:
                     raise RuntimeError("POST ERROR {}:\nStatus {}\n{}\n\n".format(path, r.status_code, r.text))
             except (ConnectionError, requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-                print("POST INFO {} ConnectionError holding for 60 seconds ({} tries remain)\t:: {}\n\n".format(
-                        path, tries, e), file=sys.stderr)
+                print("POST INFO {} ConnectionError holding for {} seconds ({} tries remain)\t:: {}\n\n".format(
+                        path, retry, tries, e), file=sys.stderr)
                 sys.stderr.flush()
-                time.sleep(60)
-                self.authorizeAccount() # do not handle PermissionError
+                time.sleep(retry)
+                ## self.authorizeAccount() # do not handle PermissionError
 
 
 
@@ -251,7 +281,7 @@ class b2:
                 print("\n\nb2_authorize_account :: {} tries remain\n".format(tries), file=sys.stderr)
             try:
                 auth = requests.auth.HTTPBasicAuth(_id, _key)
-                r = self.s.get('https://api.backblaze.com/b2api/v1/b2_authorize_account', verify=True, auth=auth, timeout=35)
+                r = self.s.get(self.authUrl, verify=True, auth=auth, timeout=self.timeout)
                 if self.verbose >= 1:
                     print("{}\n\n".format(r.text), file=sys.stderr)
                     sys.stderr.flush()
