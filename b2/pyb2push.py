@@ -528,8 +528,19 @@ class b2:
     def listUnfinishedLargeFiles(self, ):
     
     # b2_update_bucket
-    def updateBucket(self, ):
-    
+    def updateBucket(self, bucketType = "allPrivate", bucketId = None, bucketName = None):
+	if bucketId is None:
+	    try:
+		bucketId = self.lookupBucket(bucketName)['bucketId']
+	    except (Exception, ) as e:
+		return None
+	bucket = self.postAsJSON('/b2api/v1/b2_update_bucket',
+				  { 'accountId':  self.session['accountId'],
+				    'bucketId': str(bucketId),
+				    'bucketType': str(bucketType)
+				    })
+	self.storeBucket(bucket)
+	return bucket
 
 
 
