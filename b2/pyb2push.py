@@ -145,8 +145,14 @@ class b2:
 
     # These were staticmethods but are now class methods in case derived classes use class state (E.G. a database connection)
 
-    def lookupBucket(self, bucket):
-        fname = os.path.join(self.bucketDir, '{}.json'.format(bucket))
+    def lookupBucket(self, bucket = None, bucketId = None):
+	if   bucketId is not None:
+	    fname = os.path.join(self.bucketDir, '_id_{}.json'.format(bucketId))
+	elif bucket is notn None:
+	    fname = os.path.join(self.bucketDir, '{}.json'.format(bucket))
+	else:
+	    pass # Lookup online?
+
         if os.path.exists(fname):
             if self.verbose >= 2:
                 print("lookupBucket: exists {}".format(fname), file=sys.stderr)
@@ -158,9 +164,13 @@ class b2:
     def storeBucket(self, bucket_obj):
         if self.verbose >= 2:
             print("storeBucket: {}".format(bucket_obj['bucketName']), file=sys.stderr)
-        with open(os.path.join(self.bucketDir, '{}.json'.format(
-                        bucket_obj['bucketName'])), 'w') as f:
+	bfile = os.path.join(self.bucketDir, '{}.json'.format(
+					bucket_obj['bucketName']))
+        with open(bfile, 'w') as f:
             json.dump(bucket_obj, f, indent=0, sort_keys=True)
+	os.symlink(bfile, os.path.join(
+		    self.bucketDir,
+		    '_id_{}.json'.format(bucket_obj['bucketId'])))
 
     def removeBucket(self, bucket_obj):
         if self.verbose >= 2:
@@ -205,6 +215,14 @@ class b2:
     def storeFiles(self, files):
         for path, attr, info in files:
             self.storeFile(path, attr, info)
+            
+    def getBucketId(self, name = None, bucketId = None):
+	if bucketId is None:
+	    try:
+		bucketId = self.lookupBucket(bucketName)['bucketId']
+	    except (Exception, ) as e:
+		return None
+	return bucketId
 
     def postAsJSON(self, path, data):
         jdata = json.dumps(data)
@@ -358,20 +376,14 @@ class b2:
 
     # If known, delete a bucket locally and remotely, returning the information object on success, returning None on the bucket not being known.
     # b2_delete_bucket # b2DeleteBucketIfKnown
-    def deleteBucket(self, bname):
-        if bname in self.buckets:
-            _bucket = self.buckets[bucket]
-        else:
-            _bucket = self.lookupBucket(bname)
-        if _bucket is None:
+    def deleteBucket(self, name = None, bucketId = None):
+	bucketId = self.getBucketId(name = name, bucketId = bucketId)
+        if bucketId is None:
             return None
 
-        req = {
-            'accountId':  self.session['accountId'],
-            'bucketId': _bucket['bucketId']
-            }
-
-        self.postAsJSON('/b2api/v1/b2_delete_bucket', req)
+        self.postAsJSON( '/b2api/v1/b2_delete_bucket', {
+			    'accountId':  self.session['accountId'],
+			    'bucketId': bucketId })
 
         self.removeBucket(_bucket)
         if bname in self.buckets:
@@ -529,11 +541,6 @@ class b2:
     
     # b2_update_bucket
     def updateBucket(self, bucketType = "allPrivate", bucketId = None, bucketName = None):
-	if bucketId is None:
-	    try:
-		bucketId = self.lookupBucket(bucketName)['bucketId']
-	    except (Exception, ) as e:
-		return None
 	bucket = self.postAsJSON('/b2api/v1/b2_update_bucket',
 				  { 'accountId':  self.session['accountId'],
 				    'bucketId': str(bucketId),
