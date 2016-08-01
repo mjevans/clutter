@@ -503,6 +503,35 @@ class b2:
         return self.postAsJSON('/b2api/v1/b2_finish_large_file',
                                 { "fileId": fileID, "partSha1Array": sha1each})
 
+    # b2_download_file_by_id
+    def downloadFileById(self, fileID):
+    
+    # b2_download_file_by_name
+    def downloadFileByName(self, fileName):
+    
+    # b2_get_file_info
+    def getFileInfo(self, ):
+    
+    # b2_hide_file
+    def hideFile(self, ):
+    
+    # b2_list_file_names
+    def lsitFileNames(self, ):
+    
+    # b2_list_file_versions
+    def listFileVersions(self, ):
+    
+    # b2_list_parts
+    def listParts(self, ):
+    
+    # b2_list_unfinished_large_files
+    def listUnfinishedLargeFiles(self, ):
+    
+    # b2_update_bucket
+    def updateBucket(self, ):
+    
+
+
 
     def uploadFileAutoMethod(self, bucket, path, info = None):
         _file = self.lookupFile(path,None)
@@ -582,10 +611,10 @@ class b2:
 def simpleExample(bucket_files):
     bb = b2()
     cwd = os.getcwd()
-    if len(bucket_files) > 0:
+    #if len(bucket_files) > 0:
         #pass
         #print("Attempting to authorizeAccount", file=sys.stderr)
-        bb.authorizeAccount()
+        #bb.authorizeAccount()
     #bb.cancelLargeFile("")
     for apath in bucket_files:
         bucket, rpath = os.path.relpath(apath, start=cwd).split(os.sep, 1)
@@ -626,6 +655,7 @@ b2_list_unfinished_large_files
 b2_update_bucket
 *b2_upload_file
 *b2_upload_part
+
 
 https://www.backblaze.com/b2/docs/b2_list_file_names.html  Cap of 1000 files, and lists per /bucket/
 
