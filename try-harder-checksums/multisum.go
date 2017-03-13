@@ -6,15 +6,27 @@ package multisum
 //package main
 
 import (
-"io"
-"log"
-"os"
-"strings"
-"bytes"
-"encoding/json"
+	//"bytes"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
+	// "encoding/json"
+	// "crypto/sha3" //
+	"golang.org/x/crypto/sha3"
+	"hash"
+	"io"
+	"log"
+	"os"
+	//"strings"
 )
 
 // WaitGroup isn't quite what we want, the parallel processes (goroutines) need to retain their state but have completed use of the provided buffer.
+
+// Notes:
+// Amazon S3 == 5GB (5...0? or 5 binary?) Max; MD5 integrity optional
+// Backblaze B2 == 5GB (5...0 decimal) Max; SHA1 required.
+// Google Cloud Platform == ?? ; Looks like MD5 as well.
 
 type SyncUpdate uint8
 
@@ -25,146 +37,228 @@ const (
 	WriterBuffer
 )
 
-type SyncedPByte struct {
-	buffer *[]byte
-	state SyncUpdate
-}
-
 type SyncedByte struct {
 	buffer []byte
-	state SyncUpdate
+	state  SyncUpdate
 }
+
+/* type SyncedString struct {
+	str   string
+	state SyncUpdate
+} */
 
 type SyncedWorker interface {
-	worker(chan SyncedPByte, chan SyncedByte)
+	worker(chan SyncedByte)
 }
 
+// HashWorker wraps a generic has implementation with a worker method
+// :: hw := HashWorker{hash: sha1.New(), name: "sha1"}
+type HashWorker struct {
+	hash hash.Hash
+	name string // I think if this didn't have the string I could just decorate hash.Hash with the worker method (function)...
+}
 
-
-func (this baseHashObjectType) worker(cBuf chan SyncedPByte, cRet chan SyncedByte) {
-	sb := SyncedPByte{buffer:nil, state: WriterBuffer}
-	var b []byte
+func (this HashWorker) worker(cBuf chan SyncedByte) {
+	if nil == this.hash {
+		panic("HashWorker was not initiated with a valid hash, unable to continue.")
+	}
+	sb := SyncedByte{buffer: nil, state: WriterBuffer}
+	// init hash state
+	// this.Reset() // Unnecessary, this is in the constructor.  Left as a reminder.
 
 Exit:
 	for {
 		cBuf <- sb
-		sb <- cBuf
+		sb = <-cBuf
 		switch sb.state {
-			case ReaderBuffer:
-				&b = sb.buffer
-				// work
-				sb.state = WriterBuffer
-				cBuf <- sb
-			case Complete:
-				sb.state = WriterBuffer
-				cBuf <- sb
-				// prepare []byte for return
-				cRet <- SyncedByte{buffer: _, state: Complete}
-				// Work complete, resuls delivered
-				break Exit
-			case true:
-				// Abort, silently
-				break Exit
+		case ReaderBuffer:
+			// work
+			this.hash.Write(sb.buffer)
+			sb.state = WriterBuffer
+			cBuf <- sb
+		case Complete:
+			cBuf <- SyncedByte{
+				buffer: []byte("\n\"" + this.name + "\":\"" + hex.EncodeToString(this.hash.Sum(nil)) + "\""),
+				state:  Complete}
+			// Work complete, resuls delivered
+			break Exit
+		default:
+			// Abort, silently
+			break Exit
 		}
 	}
 }
 
+// HashSegsWorker is similar to HashWorker, but computes an array of hashes for each segment of rollover size
+// :: hsw = HashSegsWorker{hash: sha1.New(), rollover: 4*1024*1024, name: "sha1B2"}
+type HashSegsWorker struct {
+	hash     hash.Hash
+	rollover uint64
+	name     string
+}
 
+func (this HashSegsWorker) worker(cBuf chan SyncedByte) {
+	if nil == this.hash || 0 == len(this.name) || 0 == this.rollover {
+		panic("HashSegsWorker was not initiated completely with a valid hash or name or rollover value,  unable to continue.")
+	}
+	sb := SyncedByte{buffer: nil, state: WriterBuffer}
+	ll, lb, lseg := uint64(0), uint64(0), uint64(0)
+	hashSegs := map[uint64]string{}
+	// this.Reset() // Unnecessary, this is in the constructor.  Left as a reminder.
 
-func fileErrCheck(e error){
+Exit:
+	for {
+		cBuf <- sb
+		sb = <-cBuf
+		switch sb.state {
+		case ReaderBuffer:
+			// work
+			lb = uint64(len(sb.buffer))
+			// Note: This //completely// does not handle the case of rollover being smaller than bufsize!
+			if ((ll + lb - 1) % this.rollover) == (ll % this.rollover) {
+				this.hash.Write(sb.buffer)
+			} else {
+				remainder := this.rollover - (ll % this.rollover)
+				this.hash.Write(sb.buffer[0:remainder])
+				hashSegs[lseg] = hex.EncodeToString(this.hash.Sum(nil))
+				lseg++
+				this.hash.Reset()
+				this.hash.Write(sb.buffer[remainder:])
+			}
+			ll += lb
+			sb.state = WriterBuffer
+			cBuf <- sb
+		case Complete:
+			// prepare string for return
+			hashSegs[lseg] = hex.EncodeToString(this.hash.Sum(nil))
+
+			// Note: https://github.com/golang/go/issues/18990  There still isn't a good way of doing this:
+			// My own mostly uninformed 2 cents are that somehow telling the compiler the allocated []byte will /eventually/ be frozen in to a string; otherwise anything could grab a reference to the bytes and discard or disregard any channels/syncs/guards...
+
+			// hex is double Size(), quotes, comma (or initial :), name + 5 ( list frame [ ], returns (3))
+			rs := make([]byte, len(this.name)+5+(int(lseg)+1)*(this.hash.Size()*2+3))
+			rsp := copy(rs, []byte("\n\""+this.name+"\":"))
+			rsp += copy(rs[rsp:], []byte("[\n\""))
+			rsp += copy(rs[rsp:], hashSegs[0])
+			rsp += copy(rs[rsp:], []byte("\""))
+			for ii := uint64(1); ii <= lseg; ii++ {
+				rsp += copy(rs[rsp:], []byte(",\""))
+				rsp += copy(rs[rsp:], hashSegs[ii])
+				rsp += copy(rs[rsp:], []byte("\""))
+			}
+			_ = copy(rs[rsp:], []byte("]\n"))
+
+			cBuf <- SyncedByte{
+				buffer: rs, // See above note
+				state:  Complete}
+			// Work complete, resuls delivered
+			break Exit
+		default:
+			// Abort, silently
+			break Exit
+		}
+	}
+}
+
+func fileErrCheck(e error) {
 	if e != nil && e != io.EOF {
 		panic(e)
 	}
 }
 
-// Returns a JSON structure.
+// Returns a JSON fragment ( "ex1": [1,2,3], "ex2": "something" ... )
 // It is self-generated so that worker functions may return complex nested JSON for inclusion.
-// Workers MUST return either nil OR a valid 'JSON fragment' in the form of: "key"=...
-func fileWorker(fname string, jobs []SyncedWorker) []byte {
-	bufsize := 1024 * 1024 / 8
+// Workers MUST return either nil OR a valid 'JSON fragment' in the form of: "key":...
+func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 	b0 := make([]byte, bufsize)
 	b1 := make([]byte, bufsize)
-	var sbi SyncedPByte // SyncedPByte{buffer: nil, state: nil}
-	var sbo SyncedPByte
+	var sbi, sbo SyncedByte // SyncedByte{buffer: nil, state: nil}
 
 	f, err := os.Open(fname)
 	if err != nil {
 		log.Fatal(err)
 		//panic(e)
-		return
+		return []byte{}
 	}
 	defer f.Close()
 
 	// Setup workers
 	iLen := len(jobs)
-	workers := make([]chan SyncedPByte,	iLen) // I'm still not sure I should be using a slice here instead of an array: This is a local scope, a fixed known size, is the slice simply better as a default?
-	results := make([]chan SyncedByte,	iLen)
-	for ii := 0; ii < iLen; ii++ {
-		spb = make(chan SyncedPByte, 1)
-		sbr  = make(chan SyncedByte)
+	workers := make([]chan SyncedByte, iLen)
+	for ii, val := range jobs {
+		spb := make(chan SyncedByte, 1)
 		workers[ii] = spb
-		results[ii] = sbr
-		go jobs[ii].worker(spb, sbr)
+		go val.worker(spb)
 	}
-	
-	func updateWorkers(sbo SyncedPByte) {
-		for ii := 0; ii < iLen; ii++ {
-			sbi <- workers[ii]
+
+	updateWorkers := func(sbo SyncedByte) {
+		for _, w := range workers {
+			sbi = <-w
 			if sbi.state != WriterBuffer {
 				panic("fileWorker: Incorrect state returned from a worker thread, corrupted output was likely.")
 			}
-			workers[ii] <- sbo
+			w <- sbo
 		}
 	}
-	
+
 	for { // the entire file OR error
-		l, err := f.Read(&b0)
+		l, err := f.Read(b0)
 		fileErrCheck(err)
 		if l > 0 {
 			sbo.state = ReaderBuffer
-			sbo.buffer = &b0
+			sbo.buffer = b0
 			updateWorkers(sbo)
 		}
 		if io.EOF == err {
 			sbo.buffer = nil
 			sbo.state = Complete
 			updateWorkers(sbo)
-			break;
+			break
 		}
 
-		l, err := f.Read(&b1) // Write to the buffer in this routine, while the worker goroutines process the other buffer.
+		l, err = f.Read(b1) // Write to the buffer in this routine, while the worker goroutines process the other buffer.
 		fileErrCheck(err)
-		
+
 		if l > 0 {
 			sbo.state = ReaderBuffer
-			sbo.buffer = &b1
+			sbo.buffer = b1
 			updateWorkers(sbo)
 		}
 		if io.EOF == err {
 			sbo.buffer = nil
 			sbo.state = Complete
 			updateWorkers(sbo)
-			break;
+			break
 		}
 	}
-	
-	var rets := make([][]byte)
+
+	rets := make([]byte, 0)
+
 	var r SyncedByte
-	for ii := 0; ii < iLen; ii++ {
-		r <- results[ii]
+	for ii, w := range workers {
+		r = <-w
 		if r.state != Complete {
 			panic(r.buffer)
 		}
-		rets.append(r.buffer)
+		if ii > 0 {
+			rets = append(rets, []byte(",\n")...)
+		}
+		rets = append(rets, r.buffer...)
 	}
 
-	return bytes.Join(rets, ", ".([]byte))
+	return rets
 }
 
-func sum(fname string) []byte {
+func sum(fname string, rollover uint64) []byte {
 	//jobs = append(jobs, extra...)
+	jobs := make([]SyncedWorker, 0)
+	jobs = append(jobs, HashWorker{hash: md5.New(), name: "md5"})
+	jobs = append(jobs, HashWorker{hash: sha1.New(), name: "sha1"})
+	jobs = append(jobs, HashWorker{hash: sha256.New(), name: "sha256"})
+	jobs = append(jobs, HashWorker{hash: sha3.New256(), name: "sha3-256"})
+	jobs = append(jobs, HashWorker{hash: sha3.New512(), name: "sha3-512"})
+	jobs = append(jobs, HashSegsWorker{hash: md5.New(), rollover: rollover, name: "md5segs"})
+	jobs = append(jobs, HashSegsWorker{hash: sha1.New(), rollover: rollover, name: "sha1segs"})
+	//const bufsize = 32 * 1024
+	return fileWorker(fname, jobs, 32*1024)
 }
-
-func main() {
-}
-
