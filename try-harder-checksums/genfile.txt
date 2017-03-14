@@ -1,0 +1,28 @@
+package main
+
+import (
+	"os"
+)
+
+func main() {
+	bs := make([]byte, 1024)
+	
+	// Why this pattern?  The digests (hashes) I looked at are zero-padded.
+	// This is to //make sure// to trigger edge cases if they exist.
+	bs[0] = byte(128)
+	for ii := 1 ; ii < 256 ; ii++ {
+		bs[ii] = byte(ii)
+	}
+	copy(bs[256:], bs[0:256])
+	copy(bs[512:], bs[0:256])
+	copy(bs[768:], bs[0:256])
+	
+	f, _ := os.Create("testfile.bin")
+	defer f.Close()
+	
+	for ii := 0 ; ii < 4096 ; ii++ {
+		f.Write(bs)
+	}
+	
+	f.Write(bs[0:1]) // 4MB + 1 byte
+}

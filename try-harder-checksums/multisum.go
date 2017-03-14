@@ -6,7 +6,7 @@ package multisum
 //package main
 
 import (
-	//"bytes"
+	"bytes"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	//"strings"
+	//"fmt"
 )
 
 // WaitGroup isn't quite what we want, the parallel processes (goroutines) need to retain their state but have completed use of the provided buffer.
@@ -64,28 +65,31 @@ func (this HashWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 		panic("HashWorker was not initiated with a valid hash, unable to continue.")
 	}
 	sb := SyncedByte{buffer: nil, state: WriterBuffer}
+	oc <- sb
 	// init hash state
 	// this.Reset() // Unnecessary, this is in the constructor.  Left as a reminder.
+	ll := 0
 
-Exit:
+HashWorkerExit:
 	for {
-		oc <- sb
 		sb = <-ic
 		switch sb.state {
 		case ReaderBuffer:
 			// work
+			ll += len(sb.buffer)
 			this.hash.Write(sb.buffer)
 			sb.state = WriterBuffer
 			oc <- sb
 		case Complete:
+			//fmt.Fprintf(os.Stdout, "%s\tread\t%d\n", this.name, ll)
 			oc <- SyncedByte{
 				buffer: []byte("\n\"" + this.name + "\":\"" + hex.EncodeToString(this.hash.Sum(nil)) + "\""),
 				state:  Complete}
 			// Work complete, resuls delivered
-			break Exit
+			break HashWorkerExit
 		default:
 			// Abort, silently
-			break Exit
+			break HashWorkerExit
 		}
 	}
 }
@@ -103,30 +107,32 @@ func (this HashSegsWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 		panic("HashSegsWorker was not initiated completely with a valid hash or name or rollover value,  unable to continue.")
 	}
 	sb := SyncedByte{buffer: nil, state: WriterBuffer}
-	ll, lb, lseg := uint64(0), uint64(0), uint64(0)
+	oc <- sb
+	var ll, lb, lseg uint64 = 0, 0, 0
 	hashSegs := map[uint64]string{}
 	// this.Reset() // Unnecessary, this is in the constructor.  Left as a reminder.
 
-Exit:
+HashSegsWorkerExit:
 	for {
-		oc <- sb
 		sb = <-ic
 		switch sb.state {
 		case ReaderBuffer:
 			// work
 			lb = uint64(len(sb.buffer))
 			// Note: This //completely// does not handle the case of rollover being smaller than bufsize!
-			if ((ll + lb - 1) % this.rollover) == (ll % this.rollover) {
+			if ((ll + lb) / this.rollover) == (ll / this.rollover) {
 				this.hash.Write(sb.buffer)
 			} else {
 				remainder := this.rollover - (ll % this.rollover)
 				this.hash.Write(sb.buffer[0:remainder])
 				hashSegs[lseg] = hex.EncodeToString(this.hash.Sum(nil))
+				//fmt.Fprintf(os.Stdout, "%s\t%d\t%x\t%x\t%s\n", this.name, lseg, ll, ll + lb - 1, hashSegs[lseg])
 				lseg++
 				this.hash.Reset()
 				this.hash.Write(sb.buffer[remainder:])
 			}
 			ll += lb
+			//fmt.Fprintf(os.Stdout, "%s : %d\n", this.name, ll)
 			sb.state = WriterBuffer
 			oc <- sb
 		case Complete:
@@ -137,7 +143,8 @@ Exit:
 			// My own mostly uninformed 2 cents are that somehow telling the compiler the allocated []byte will /eventually/ be frozen in to a string; otherwise anything could grab a reference to the bytes and discard or disregard any channels/syncs/guards...
 
 			// hex is double Size(), quotes, comma (or initial :), name + 5 ( list frame [ ], returns (3))
-			rs := make([]byte, len(this.name)+5+(int(lseg)+1)*(this.hash.Size()*2+3))
+			rs := make([]byte, 2+len(this.name)+2 + 2 + (int(lseg)+1)*(this.hash.Size()*2+3))
+			//fmt.Fprintf(os.Stdout, "%s\t%d\t%d\n", this.name, lseg, cap(rs))
 			rsp := copy(rs, []byte("\n\""+this.name+"\":"))
 			rsp += copy(rs[rsp:], []byte("[\n\""))
 			rsp += copy(rs[rsp:], hashSegs[0])
@@ -148,15 +155,16 @@ Exit:
 				rsp += copy(rs[rsp:], []byte("\""))
 			}
 			_ = copy(rs[rsp:], []byte("]\n"))
+			//fmt.Fprintf(os.Stdout, "%s\tend\t%s\t%d\n", this.name, rs[rsp:], rsp)
 
 			oc <- SyncedByte{
 				buffer: rs, // See above note
 				state:  Complete}
 			// Work complete, resuls delivered
-			break Exit
+			break HashSegsWorkerExit
 		default:
 			// Abort, silently
-			break Exit
+			break HashSegsWorkerExit
 		}
 	}
 }
@@ -170,18 +178,10 @@ func fileErrCheck(e error) {
 // Returns a JSON fragment ( "ex1": [1,2,3], "ex2": "something" ... )
 // It is self-generated so that worker functions may return complex nested JSON for inclusion.
 // Workers MUST return either nil OR a valid 'JSON fragment' in the form of: "key":...
-func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
+func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 	b0 := make([]byte, bufsize)
 	b1 := make([]byte, bufsize)
 	var sbi, sbo SyncedByte // SyncedByte{buffer: nil, state: nil}
-
-	f, err := os.Open(fname)
-	if err != nil {
-		log.Fatal(err)
-		//panic(e)
-		return []byte{}
-	}
-	defer f.Close()
 
 	// Setup workers
 	iLen := len(jobs)
@@ -196,21 +196,31 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 	}
 
 	updateWorkers := func(sbo SyncedByte) {
-		for ii, w := range workers {
-			sbi = <-results[ii]
+		for _, r := range results {
+			sbi = <- r
 			if sbi.state != WriterBuffer {
 				panic("fileWorker: Incorrect state returned from a worker thread, corrupted output was likely.")
 			}
+		}
+		for _, w := range workers {
 			w <- sbo
 		}
 	}
 
+	//ll := 0
 	for { // the entire file OR error
 		l, err := f.Read(b0)
 		fileErrCheck(err)
+		//ll += l
+		//fmt.Fprintf(os.Stdout, "read\t%d\t%d\t%v\t%d\n", ll, l, err, len(b0))
+
 		if l > 0 {
 			sbo.state = ReaderBuffer
-			sbo.buffer = b0
+			if int(bufsize) == l {
+				sbo.buffer = b0
+			} else {
+				sbo.buffer = b0[0:l]
+			}
 			updateWorkers(sbo)
 		}
 		if io.EOF == err {
@@ -222,10 +232,16 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 
 		l, err = f.Read(b1) // Write to the buffer in this routine, while the worker goroutines process the other buffer.
 		fileErrCheck(err)
+		//ll += l
+		//fmt.Fprintf(os.Stdout, "read\t%d\t%d\t%v\t%d\n", ll, l, err, len(b1))
 
 		if l > 0 {
 			sbo.state = ReaderBuffer
-			sbo.buffer = b1
+			if int(bufsize) == l {
+				sbo.buffer = b1
+			} else {
+				sbo.buffer = b1[0:l]
+			}
 			updateWorkers(sbo)
 		}
 		if io.EOF == err {
@@ -253,7 +269,7 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 	return rets
 }
 
-func sum(fname string, rollover uint64) []byte {
+func sumReader(f io.Reader, rollover uint64) []byte {
 	//jobs = append(jobs, extra...)
 	// I've made a /guess/ about the runtime required for each thread, and sorted them in the /HOPE/ that golang will wake the low indexed goroutines first...
 	// If I blocked the writer thread, handed back a buffered channel wakeup to it, and then continued I think I could FORCE sync... but I'm not sure that would be better, and it sounds WAY more complex.
@@ -266,5 +282,19 @@ func sum(fname string, rollover uint64) []byte {
 	jobs = append(jobs, HashWorker{hash: md5.New(), name: "md5"})
 	jobs = append(jobs, HashSegsWorker{hash: md5.New(), rollover: rollover, name: "md5segs"})
 	//const bufsize = 32 * 1024
-	return fileWorker(fname, jobs, 32*1024)
+	
+	return fileWorker(f, jobs, 32*1024)
 }
+
+func sum(fname string, rollover uint64) []byte {
+	f, err := os.Open(fname)
+	if err != nil {
+		log.Fatal(err)
+		//panic(e)
+		return []byte{}
+	}
+	defer f.Close()
+	
+	return sumReader(f, rollover)
+}
+
