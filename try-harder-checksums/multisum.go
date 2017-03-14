@@ -48,7 +48,8 @@ type SyncedByte struct {
 } */
 
 type SyncedWorker interface {
-	worker(chan SyncedByte)
+	// 		Receive then Send.
+	worker(<-chan SyncedByte, chan<- SyncedByte)
 }
 
 // HashWorker wraps a generic has implementation with a worker method
@@ -58,7 +59,7 @@ type HashWorker struct {
 	name string // I think if this didn't have the string I could just decorate hash.Hash with the worker method (function)...
 }
 
-func (this HashWorker) worker(cBuf chan SyncedByte) {
+func (this HashWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 	if nil == this.hash {
 		panic("HashWorker was not initiated with a valid hash, unable to continue.")
 	}
@@ -68,16 +69,16 @@ func (this HashWorker) worker(cBuf chan SyncedByte) {
 
 Exit:
 	for {
-		cBuf <- sb
-		sb = <-cBuf
+		oc <- sb
+		sb = <-ic
 		switch sb.state {
 		case ReaderBuffer:
 			// work
 			this.hash.Write(sb.buffer)
 			sb.state = WriterBuffer
-			cBuf <- sb
+			oc <- sb
 		case Complete:
-			cBuf <- SyncedByte{
+			oc <- SyncedByte{
 				buffer: []byte("\n\"" + this.name + "\":\"" + hex.EncodeToString(this.hash.Sum(nil)) + "\""),
 				state:  Complete}
 			// Work complete, resuls delivered
@@ -97,7 +98,7 @@ type HashSegsWorker struct {
 	name     string
 }
 
-func (this HashSegsWorker) worker(cBuf chan SyncedByte) {
+func (this HashSegsWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 	if nil == this.hash || 0 == len(this.name) || 0 == this.rollover {
 		panic("HashSegsWorker was not initiated completely with a valid hash or name or rollover value,  unable to continue.")
 	}
@@ -108,8 +109,8 @@ func (this HashSegsWorker) worker(cBuf chan SyncedByte) {
 
 Exit:
 	for {
-		cBuf <- sb
-		sb = <-cBuf
+		oc <- sb
+		sb = <-ic
 		switch sb.state {
 		case ReaderBuffer:
 			// work
@@ -127,7 +128,7 @@ Exit:
 			}
 			ll += lb
 			sb.state = WriterBuffer
-			cBuf <- sb
+			oc <- sb
 		case Complete:
 			// prepare string for return
 			hashSegs[lseg] = hex.EncodeToString(this.hash.Sum(nil))
@@ -148,7 +149,7 @@ Exit:
 			}
 			_ = copy(rs[rsp:], []byte("]\n"))
 
-			cBuf <- SyncedByte{
+			oc <- SyncedByte{
 				buffer: rs, // See above note
 				state:  Complete}
 			// Work complete, resuls delivered
@@ -185,15 +186,18 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 	// Setup workers
 	iLen := len(jobs)
 	workers := make([]chan SyncedByte, iLen)
+	results := make([]chan SyncedByte, iLen)
 	for ii, val := range jobs {
-		spb := make(chan SyncedByte, 1)
-		workers[ii] = spb
-		go val.worker(spb)
+		csb := make(chan SyncedByte, 1)
+		csr := make(chan SyncedByte)
+		workers[ii] = csb
+		results[ii] = csr
+		go val.worker(csb, csr)
 	}
 
 	updateWorkers := func(sbo SyncedByte) {
-		for _, w := range workers {
-			sbi = <-w
+		for ii, w := range workers {
+			sbi = <-results[ii]
 			if sbi.state != WriterBuffer {
 				panic("fileWorker: Incorrect state returned from a worker thread, corrupted output was likely.")
 			}
@@ -235,7 +239,7 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 	rets := make([]byte, 0)
 
 	var r SyncedByte
-	for ii, w := range workers {
+	for ii, w := range results {
 		r = <-w
 		if r.state != Complete {
 			panic(r.buffer)
@@ -251,14 +255,16 @@ func fileWorker(fname string, jobs []SyncedWorker, bufsize uint64) []byte {
 
 func sum(fname string, rollover uint64) []byte {
 	//jobs = append(jobs, extra...)
+	// I've made a /guess/ about the runtime required for each thread, and sorted them in the /HOPE/ that golang will wake the low indexed goroutines first...
+	// If I blocked the writer thread, handed back a buffered channel wakeup to it, and then continued I think I could FORCE sync... but I'm not sure that would be better, and it sounds WAY more complex.
 	jobs := make([]SyncedWorker, 0)
-	jobs = append(jobs, HashWorker{hash: md5.New(), name: "md5"})
-	jobs = append(jobs, HashWorker{hash: sha1.New(), name: "sha1"})
-	jobs = append(jobs, HashWorker{hash: sha256.New(), name: "sha256"})
-	jobs = append(jobs, HashWorker{hash: sha3.New256(), name: "sha3-256"})
 	jobs = append(jobs, HashWorker{hash: sha3.New512(), name: "sha3-512"})
-	jobs = append(jobs, HashSegsWorker{hash: md5.New(), rollover: rollover, name: "md5segs"})
+	jobs = append(jobs, HashWorker{hash: sha3.New256(), name: "sha3-256"})
+	jobs = append(jobs, HashWorker{hash: sha256.New(), name: "sha256"})
 	jobs = append(jobs, HashSegsWorker{hash: sha1.New(), rollover: rollover, name: "sha1segs"})
+	jobs = append(jobs, HashWorker{hash: sha1.New(), name: "sha1"})
+	jobs = append(jobs, HashWorker{hash: md5.New(), name: "md5"})
+	jobs = append(jobs, HashSegsWorker{hash: md5.New(), rollover: rollover, name: "md5segs"})
 	//const bufsize = 32 * 1024
 	return fileWorker(fname, jobs, 32*1024)
 }
