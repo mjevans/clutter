@@ -6,28 +6,19 @@ package multisum
 //package main
 
 import (
-	"bytes"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
-	// "encoding/json"
 	// "crypto/sha3" //
 	"golang.org/x/crypto/sha3"
 	"hash"
 	"io"
 	"log"
 	"os"
-	//"strings"
-	//"fmt"
 )
 
 // WaitGroup isn't quite what we want, the parallel processes (goroutines) need to retain their state but have completed use of the provided buffer.
-
-// Notes:
-// Amazon S3 == 5GB (5...0? or 5 binary?) Max; MD5 integrity optional
-// Backblaze B2 == 5GB (5...0 decimal) Max; SHA1 required.
-// Google Cloud Platform == ?? ; Looks like MD5 as well.
 
 type SyncUpdate uint8
 
@@ -43,14 +34,18 @@ type SyncedByte struct {
 	state  SyncUpdate
 }
 
-/* type SyncedString struct {
-	str   string
-	state SyncUpdate
-} */
-
 type SyncedWorker interface {
 	// 		Receive then Send.
-	worker(<-chan SyncedByte, chan<- SyncedByte)
+	Worker(<-chan SyncedByte, chan<- SyncedByte)
+	//	The worker MUST implement this contract:
+	//	Emit an initial return of 'WriterBuffer' to convey that it does not presently hold* (plan to use) a copy of the buffer. (This synchronizes the state machines.)
+	//	Then:
+	//		Recieve ReaderBuffer // A buffer to process, ReadOnly
+	//		Return  WriterBuffer // Done processing
+	//	  OR
+	//		Recieve Complete // No further buffers
+	//		Return  Complete + any result []byte (or empty)
+	//	If Error is the state passed in the buffer MUST NOT be used, any prior worker state is invalid.
 }
 
 // HashWorker wraps a generic has implementation with a worker method
@@ -60,11 +55,12 @@ type HashWorker struct {
 	name string // I think if this didn't have the string I could just decorate hash.Hash with the worker method (function)...
 }
 
-func (this HashWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
+func (this HashWorker) Worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 	if nil == this.hash {
 		panic("HashWorker was not initiated with a valid hash, unable to continue.")
 	}
 	sb := SyncedByte{buffer: nil, state: WriterBuffer}
+	// Declare ready for owrk
 	oc <- sb
 	// init hash state
 	// this.Reset() // Unnecessary, this is in the constructor.  Left as a reminder.
@@ -81,7 +77,6 @@ HashWorkerExit:
 			sb.state = WriterBuffer
 			oc <- sb
 		case Complete:
-			//fmt.Fprintf(os.Stdout, "%s\tread\t%d\n", this.name, ll)
 			oc <- SyncedByte{
 				buffer: []byte("\n\"" + this.name + "\":\"" + hex.EncodeToString(this.hash.Sum(nil)) + "\""),
 				state:  Complete}
@@ -102,11 +97,12 @@ type HashSegsWorker struct {
 	name     string
 }
 
-func (this HashSegsWorker) worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
+func (this HashSegsWorker) Worker(ic <-chan SyncedByte, oc chan<- SyncedByte) {
 	if nil == this.hash || 0 == len(this.name) || 0 == this.rollover {
 		panic("HashSegsWorker was not initiated completely with a valid hash or name or rollover value,  unable to continue.")
 	}
 	sb := SyncedByte{buffer: nil, state: WriterBuffer}
+	// Declare ready for owrk
 	oc <- sb
 	var ll, lb, lseg uint64 = 0, 0, 0
 	hashSegs := map[uint64]string{}
@@ -126,13 +122,11 @@ HashSegsWorkerExit:
 				remainder := this.rollover - (ll % this.rollover)
 				this.hash.Write(sb.buffer[0:remainder])
 				hashSegs[lseg] = hex.EncodeToString(this.hash.Sum(nil))
-				//fmt.Fprintf(os.Stdout, "%s\t%d\t%x\t%x\t%s\n", this.name, lseg, ll, ll + lb - 1, hashSegs[lseg])
 				lseg++
 				this.hash.Reset()
 				this.hash.Write(sb.buffer[remainder:])
 			}
 			ll += lb
-			//fmt.Fprintf(os.Stdout, "%s : %d\n", this.name, ll)
 			sb.state = WriterBuffer
 			oc <- sb
 		case Complete:
@@ -142,9 +136,7 @@ HashSegsWorkerExit:
 			// Note: https://github.com/golang/go/issues/18990  There still isn't a good way of doing this:
 			// My own mostly uninformed 2 cents are that somehow telling the compiler the allocated []byte will /eventually/ be frozen in to a string; otherwise anything could grab a reference to the bytes and discard or disregard any channels/syncs/guards...
 
-			// hex is double Size(), quotes, comma (or initial :), name + 5 ( list frame [ ], returns (3))
-			rs := make([]byte, 2+len(this.name)+2 + 2 + (int(lseg)+1)*(this.hash.Size()*2+3))
-			//fmt.Fprintf(os.Stdout, "%s\t%d\t%d\n", this.name, lseg, cap(rs))
+			rs := make([]byte, 2+len(this.name)+2+2+(int(lseg)+1)*(this.hash.Size()*2+3))
 			rsp := copy(rs, []byte("\n\""+this.name+"\":"))
 			rsp += copy(rs[rsp:], []byte("[\n\""))
 			rsp += copy(rs[rsp:], hashSegs[0])
@@ -155,7 +147,6 @@ HashSegsWorkerExit:
 				rsp += copy(rs[rsp:], []byte("\""))
 			}
 			_ = copy(rs[rsp:], []byte("]\n"))
-			//fmt.Fprintf(os.Stdout, "%s\tend\t%s\t%d\n", this.name, rs[rsp:], rsp)
 
 			oc <- SyncedByte{
 				buffer: rs, // See above note
@@ -169,16 +160,10 @@ HashSegsWorkerExit:
 	}
 }
 
-func fileErrCheck(e error) {
-	if e != nil && e != io.EOF {
-		panic(e)
-	}
-}
-
 // Returns a JSON fragment ( "ex1": [1,2,3], "ex2": "something" ... )
 // It is self-generated so that worker functions may return complex nested JSON for inclusion.
 // Workers MUST return either nil OR a valid 'JSON fragment' in the form of: "key":...
-func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
+func ConductorReaderWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 	b0 := make([]byte, bufsize)
 	b1 := make([]byte, bufsize)
 	var sbi, sbo SyncedByte // SyncedByte{buffer: nil, state: nil}
@@ -192,12 +177,12 @@ func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 		csr := make(chan SyncedByte)
 		workers[ii] = csb
 		results[ii] = csr
-		go val.worker(csb, csr)
+		go val.Worker(csb, csr)
 	}
 
 	updateWorkers := func(sbo SyncedByte) {
 		for _, r := range results {
-			sbi = <- r
+			sbi = <-r
 			if sbi.state != WriterBuffer {
 				panic("fileWorker: Incorrect state returned from a worker thread, corrupted output was likely.")
 			}
@@ -207,19 +192,22 @@ func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 		}
 	}
 
-	//ll := 0
-	for { // the entire file OR error
-		l, err := f.Read(b0)
-		fileErrCheck(err)
-		//ll += l
-		//fmt.Fprintf(os.Stdout, "read\t%d\t%d\t%v\t%d\n", ll, l, err, len(b0))
+	bufferPass := func(b []byte) bool {
+		l, err := f.Read(b)
+
+		// nil and EOF are the only error states expected
+		switch err {
+		case nil, io.EOF:
+		default:
+			panic(err)
+		}
 
 		if l > 0 {
 			sbo.state = ReaderBuffer
 			if int(bufsize) == l {
-				sbo.buffer = b0
+				sbo.buffer = b // Avoiding slicing is about 10% faster for my go test on my test system.
 			} else {
-				sbo.buffer = b0[0:l]
+				sbo.buffer = b[0:l]
 			}
 			updateWorkers(sbo)
 		}
@@ -227,27 +215,16 @@ func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 			sbo.buffer = nil
 			sbo.state = Complete
 			updateWorkers(sbo)
+			return false // means: trigger break
+		}
+		return true
+	}
+
+	for {
+		if !bufferPass(b0) {
 			break
 		}
-
-		l, err = f.Read(b1) // Write to the buffer in this routine, while the worker goroutines process the other buffer.
-		fileErrCheck(err)
-		//ll += l
-		//fmt.Fprintf(os.Stdout, "read\t%d\t%d\t%v\t%d\n", ll, l, err, len(b1))
-
-		if l > 0 {
-			sbo.state = ReaderBuffer
-			if int(bufsize) == l {
-				sbo.buffer = b1
-			} else {
-				sbo.buffer = b1[0:l]
-			}
-			updateWorkers(sbo)
-		}
-		if io.EOF == err {
-			sbo.buffer = nil
-			sbo.state = Complete
-			updateWorkers(sbo)
+		if !bufferPass(b1) {
 			break
 		}
 	}
@@ -269,7 +246,11 @@ func fileWorker(f io.Reader, jobs []SyncedWorker, bufsize uint64) []byte {
 	return rets
 }
 
-func sumReader(f io.Reader, rollover uint64) []byte {
+// Notes:
+// Amazon S3 == 5GB (5...0? or 5 binary?) Max; MD5 integrity optional
+// Backblaze B2 == 5GB (5...0 decimal) Max; SHA1 required.
+// Google Cloud Platform == ?? ; Looks like MD5 as well.
+func SumReader(f io.Reader, rollover uint64) []byte {
 	//jobs = append(jobs, extra...)
 	// I've made a /guess/ about the runtime required for each thread, and sorted them in the /HOPE/ that golang will wake the low indexed goroutines first...
 	// If I blocked the writer thread, handed back a buffered channel wakeup to it, and then continued I think I could FORCE sync... but I'm not sure that would be better, and it sounds WAY more complex.
@@ -282,11 +263,11 @@ func sumReader(f io.Reader, rollover uint64) []byte {
 	jobs = append(jobs, HashWorker{hash: md5.New(), name: "md5"})
 	jobs = append(jobs, HashSegsWorker{hash: md5.New(), rollover: rollover, name: "md5segs"})
 	//const bufsize = 32 * 1024
-	
-	return fileWorker(f, jobs, 32*1024)
+
+	return ConductorReaderWorker(f, jobs, 32*1024)
 }
 
-func sum(fname string, rollover uint64) []byte {
+func Sum(fname string, rollover uint64) []byte {
 	f, err := os.Open(fname)
 	if err != nil {
 		log.Fatal(err)
@@ -294,7 +275,6 @@ func sum(fname string, rollover uint64) []byte {
 		return []byte{}
 	}
 	defer f.Close()
-	
-	return sumReader(f, rollover)
-}
 
+	return SumReader(f, rollover)
+}
