@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>Time Bank</title>
+<meta charset="UTF-8" />
+<style>
+.TimeBankDisplay {
+	display: inline-block;
+	color: white;
+	background-color: purple;
+	font-variant-caps: small-caps;
+	padding: 0.5em;
+	width: auto;
+}
+
+.TimeBankLeft {
+	display: inline-block;
+	font-size: medium;
+	word-wrap: break-word;
+	width: 6em;
+	text-align: left;
+	vertical-align: top;
+}
+.TimeBankRight {
+	display: inline-block;
+	font-family: monospace;
+	font-size: xx-large;
+	font-weight: bold;
+	width: 4em;
+	text-align: right;
+	vertical-align: bottom;
+}
+</style>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+<script type="text/javascript">
+	console.log("Local Storage Test - Time Bank");
+	
+	var LSPrefix = 'githubUserMJEvansLSTestTimeBank';
+	var tTickDur = 1 * 1 * 1 * 1000;
+	var tSaveDur = 1 * 5 * 60 * 1000;
+	
+	var tBank = localStorage.getItem(LSPrefix + 'Bank');
+	var tClock = localStorage.getItem(LSPrefix + 'Clock');
+	var tActive = localStorage.getItem(LSPrefix + 'Active');
+	var fHourly = localStorage.getItem(LSPrefix + 'Hourly');
+	
+	if (tBank == null) { tBank = 0; };
+	if (tClock == null) { tClock = 0; };
+	//if (tActive == null) { tActive = false };
+	if (fHourly == null) { fHourly = 12.0; };
+	
+	console.log("tBank: " + tBank)
+	console.log("tClock: " + tClock)
+	console.log("tActive: " + tActive)
+	console.log("fHourly: " + fHourly)
+	
+	function TBSetHourly() {
+		fHourly = parseFloat(document.getElementsByClassName('TimeBankHourly')[0].innerHTML);
+		localStorage.setItem(LSPrefix + 'Hourly', fHourly);
+	}
+	
+	function TBMoneyBank() {
+		tBank += 1000.0 * 3600.0 * parseFloat(document.getElementsByClassName('TimeBankMoneyIn')[0].innerHTML) / fHourly;
+		TBSave();
+		document.getElementsByClassName('TimeBankMoneyIn')[0].innerHTML = "0.0";
+	}
+
+	function TBMoneyClock() {
+		tClock += 1000.0 * 3600.0 * parseFloat(document.getElementsByClassName('TimeBankMoneyIn')[0].innerHTML) / fHourly;
+		TBSave();
+		document.getElementsByClassName('TimeBankMoneyIn')[0].innerHTML = "0.0";
+	}
+
+	function TBMinBank() {
+		tBank += 60.0 * 1000.0 * parseFloat(document.getElementsByClassName('TimeBankXferMin')[0].innerHTML);
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBMinClock() {
+		tClock += 60.0 * 1000.0 * parseFloat(document.getElementsByClassName('TimeBankXferMin')[0].innerHTML);
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBMinXferClockBank() {
+		var tXfer = 60.0 * 1000.0 * parseFloat(document.getElementsByClassName('TimeBankXferMin')[0].innerHTML);
+		tClock -= tXfer;
+		tBank  += tXfer;
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBMinXferBankClock() {
+		var tXfer = 60.0 * 1000.0 * parseFloat(document.getElementsByClassName('TimeBankXferMin')[0].innerHTML);
+		tBank  -= tXfer;
+		tClock += tXfer;
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBAllXferClockBank() {
+		TBSave(); // Force tActive sync
+		tBank  += tClock;
+		tClock = 0;
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBAllXferBankClock() {
+		TBSave(); // Force tActive sync
+		tClock  += tBank;
+		tBank = 0;
+		TBSave();
+		document.getElementsByClassName('TimeBankXferMin')[0].innerHTML = "0";
+	}
+
+	function TBSetBank() {
+		tBank = parseFloat(document.getElementsByClassName('TimeBankRawBank')[0].innerHTML);
+		TBSave();
+	}
+
+	function TBSetClock() {
+		tClock = parseFloat(document.getElementsByClassName('TimeBankRawClock')[0].innerHTML);
+		TBSave();
+	}
+	
+	function TBCurDur() {
+		if (tActive > 0) {
+			return (new Date().getTime()) - tActive;
+		} else {
+			return 0;
+		}
+	}
+
+	function TBSave() {
+		tClock -= TBCurDur()
+		if (tActive > 0) { tActive = new Date().getTime(); } ;
+		localStorage.setItem(LSPrefix + 'Bank', tBank);
+		localStorage.setItem(LSPrefix + 'Clock', tClock);
+		localStorage.setItem(LSPrefix + 'Active', tActive);
+		TBRedrawBank();
+		TBRedrawClock();
+		if (tActive === null) {
+			try {
+				document.getElementsByClassName('TimeBankRawBank')[0].innerHTML = "" + tBank
+				document.getElementsByClassName('TimeBankRawClock')[0].innerHTML = "" + tClock
+			} catch(err) {
+				// Do not care.
+			}
+		}
+	}
+	
+	function NumberZeroPad2(num) {
+		var z = "00" + num;
+		return z.substr(z.length - 2);
+	}
+
+	function StringTimeFromSecs(tSecs) {
+		var sSecs = tSecs / 1000;
+		if (1 == ~~(sSecs % 2)) {
+			var tSep = '.';
+		} else {
+			var tSep = ':';
+		}
+		//console.log("" + sSecs % 2 + "\t" + NumberZeroPad2(~~(sSecs % 60)))
+		//console.log("" + sSecs % 2 + "\t" + NumberZeroPad2(~~((sSecs % 3600) / 60)))
+		return "" + (~~(sSecs / 3600)).toFixed(0) + tSep + NumberZeroPad2(~~((sSecs % 3600) / 60));
+		 //+ tSep + NumberZeroPad2(~~(sSecs % 60));
+	}
+	
+	function TBRedrawBank() {
+		document.getElementsByClassName('TimeBankBank')[0].innerHTML = StringTimeFromSecs(tBank);
+	}
+
+	function TBRedrawClock() {
+		document.getElementsByClassName('TimeBankClock')[0].innerHTML = StringTimeFromSecs(tClock - TBCurDur());
+	}
+	
+	function TBRoundUpToMin() {
+		TBSave();
+		tClock = Math.ceil(tClock / 60000) * 60000
+		tBank = Math.ceil(tBank / 60000) * 60000
+		TBSave();
+	}
+	
+	function TBTick() {
+		if (tActive > 0) {
+			if (TBCurDur > tSaveDur) { TBSave(); };
+			TBRedrawClock();
+			console.log("Tick: " + (tClock - TBCurDur()))
+		} else {
+			console.log("ERROR: Ticking, but not active...")
+		}
+	}
+
+	var intervalTicker = null;
+	
+	function TBStartClock() {
+		TBStopClock();
+		document.getElementsByClassName('TimeBankUIBank')[0].innerHTML = "<p>Raw bank edits disabled while clock ticking.</p>";
+		document.getElementsByClassName('TimeBankUIClock')[0].innerHTML = "<p>Raw clock edits disabled while clock ticking.</p>";
+		tActive = new Date().getTime();
+		TBSave();
+		intervalTicker = setInterval(TBTick, tTickDur);
+	}
+	
+	function TBStopClock() {
+		if (! (intervalTicker === null)) {
+			clearInterval(intervalTicker);
+			intervalTicker = null;
+		}		
+		TBSave();
+		tActive = null;
+		TBSave();
+		document.getElementsByClassName('TimeBankUIBank')[0].innerHTML =
+			"<div class=\"TimeBankRawBank\" contenteditable=\"true\">" + Number(tBank).toFixed(0) + "</div>\n" +
+			"<button type=\"button\" onclick=\"TBSetBank();\">Set Bank (mSec)</button>\n";
+		document.getElementsByClassName('TimeBankUIClock')[0].innerHTML =
+			"<div class=\"TimeBankRawClock\" contenteditable=\"true\">" + Number(tClock).toFixed(0) + "</div>\n" +
+			"<button type=\"button\" onclick=\"TBSetClock();\">Set Clock (mSec)</button>\n";
+	}
+	
+	function ReadyStartup() {
+		document.getElementsByClassName('TimeBankUIMain')[0].innerHTML =
+		"<div>\n<div class=\"TimeBankHourly\" contenteditable=\"true\">" + Number(fHourly).toFixed(2) + "</div>\n" +
+		"<button type=\"button\" onclick=\"TBSetHourly();\">Set Hourly</button>\n" +
+		"<div class=\"TimeBankMoneyIn\" contenteditable=\"true\">0.0</div>\n" +
+		"<button type=\"button\" onclick=\"TBMoneyBank();\">Add Money to Bank</button>\n" +
+		"<button type=\"button\" onclick=\"TBMoneyClock();\">Add Money to Clock</button>\n</div>\n" +
+		"<div>\n<div class=\"TimeBankXferMin\" contenteditable=\"true\">0</div>\n" +
+		"<button type=\"button\" onclick=\"TBMinBank();\">Add Min to Bank</button>\n" +
+		"<button type=\"button\" onclick=\"TBMinClock();\">Add Min to Clock</button>\n" +
+		"<button type=\"button\" onclick=\"TBMinXferClockBank();\">FROM Clock</button>\n" +
+		"<button type=\"button\" onclick=\"TBMinXferBankClock();\">FROM Bank</button>\n" +
+		"<button type=\"button\" onclick=\"TBAllXferClockBank();\">All to Bank</button>\n" +
+		"<button type=\"button\" onclick=\"TBAllXferBankClock();\">All to Clock</button>\n" +
+		"</div>\n";
+		
+		TBRedrawBank();
+		TBRedrawClock();
+
+		//console.log("tActive in context: " + tActive)
+
+		
+		if (tActive > 0) {
+			TBStartClock();
+		} else {
+			TBStopClock();
+		}
+	}
+	
+	$(document).ready(ReadyStartup);
+</script>
+</head>
+<body>
+<div class="TimeBankDisplay">
+<div>
+<span class="TimeBankBankLabel TimeBankLeft">Banked:</span><span class="TimeBankBank TimeBankRight"></span>
+</div>
+<div>
+<span class="TimeBankClockLabel TimeBankLeft">Stream time Remaining:</span><span class="TimeBankClock TimeBankRight"></span>
+</div>
+</div>
+<div>
+<button type="button" onclick="TBStartClock();">Start</button>
+<button type="button" onclick="TBStopClock();">Stop</button>
+<button type="button" onclick="TBRoundUpToMin();">Round up to Min</button>
+</div>
+<div class="TimeBankUIMain">
+</div>
+<div class="TimeBankUIBank">
+</div>
+<div class="TimeBankUIClock">
+</div>
+</body>
+</html>
