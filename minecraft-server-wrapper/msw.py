@@ -1,3 +1,14 @@
+# kate: replace-tabs on; indent-width 4; tab-indents true; tab-width 4; indent-mode python; auto-brackets false; bom false; eol unix;
+# https://docs.kde.org/stable5/en/applications/katepart/kate-part-autoindent.html
+
+# Written by 'mjevans' 2019-05-30
+# Distributed under a choice of:
+# LGPLv3 - https://www.gnu.org/licenses/lgpl-3.0.html
+# CC BY-SA - https://creativecommons.org/licenses/ (the attribute, share-alike license)
+# BSD-3-Clause - https://directory.fsf.org/wiki/License:BSD-3-Clause
+
+# In any of the above three cases, please reference the BSD-3-Clause license for the full text fo the warranty disclaimer: "THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS''..." with more legal text saying that there isn't a warranty and to generally be greatful to be given things for free when they happen.
+
 from __future__ import (absolute_import, division,
                         print_function, unicode_literals)
 #from builtins import *
@@ -5,9 +16,6 @@ from __future__ import (absolute_import, division,
 from six import iteritems
 
 from io import open
-
-# kate: replace-tabs on; indent-width 4; tab-indents true; tab-width 4; indent-mode python; auto-brackets false; bom false; eol unix;
-# https://docs.kde.org/stable5/en/applications/katepart/kate-part-autoindent.html
 
 import argparse
 import datetime
@@ -18,6 +26,11 @@ import sys
 from tempfile import mkdtemp
 import unittest
 import zipfile
+
+
+# https://github.com/twoolie/NBT
+# Please have a symlink to or copy of the 'nbt' module in the current working directory or the parent directory
+# ln -s /whatever/somewhere/else/github.com/twoolie/NBT/nbt ./nbt
 
 # local module
 try:
