@@ -1,0 +1,116 @@
+Personally, I've run Minecraft servers before in shell-script loops, often under a tmux session.
+
+However, this is for a different context.  I'm strongly considering adding the ability to run a server under it, but interacting with the console in a multi-python-version way would probably be annoying.  The actual intended use case is actually for a streamer's sub-server and someone in that community is already using a commercial product that has tons of features to manage the server.
+
+This mostly fills in a specialized need, a need special enough that maybe only I see it.
+
+## The Problem ##
+
+* Cave mining is much more fun than branch mining.
+* Cave mining also leaves areas with ‘low hanging fruit’ picked.
+* It can be very difficult to tell if an area’s claimed / already picked over.
+* Managing this is difficult.
+* Penning in users to prevent terrain generation exacerbates the problem.
+
+## A Solution ##
+
++ Only allow permanent builds within specified areas. (E.G. +/- 2000 X and Z)
++ Also ban random mining (mostly ‘caving’) within those areas, unless it’s in a claimed area.
+@ After server shutdown, alter the **players** so that anyone out of bounds is back at ‘spawn’.
+@ Then also remove the region files that are outside of the allowed area.
+@ Areas between the ‘build zone’ and the edge of the allowed world border become the Mining Zone.
+
+That should limit terrain generation, with a modification pre-generated chunks can be copied in from offline to replace (instead of delete) server side chunks (this isn’t in the config, but it’d be pretty easy to code).
+
+The python code, and argument helper should still be simple enough to serve as documentation, however a quick-start guide would be useful.
+
+# https://github.com/twoolie/NBT
+# Please have a symlink to or copy of the 'nbt' module in the current working directory or the parent directory
+ln -s /whatever/somewhere/else/github.com/twoolie/NBT/nbt ./nbt
+
+# Run the unit tests (uses a temp-directory, otherwise shouldn’t have any impact)
+python msw.py -t
+
+# Save a config file, optionally specify a non-default file.
+python msw.py -u -c msw.config.json
+
+# Edit that config file to taste, making sure to configure SafeTP (a spawn location in dimension, x, y, z format).
+
+# Run the program after each server shutdown (or while shutdown, but periodically).
+python msw.py -c /some/path/msw.config.json -d /some/path/to/minecraft -w world
+
+An example config file might be customized (change from the defaults) like thus:
+
+{
+    "BackupAfterCleanup": false, 
+    "BackupAfterExit": false, 
+    "PruneRegionsAfterExit": true, 
+    "RegionPaths": {
+        "-1": "DIM-1", 
+        "0": "region", 
+        "1": "DIM1"
+    }, 
+    "ReloadConfigAfterExit": false, 
+    "RunLoop": false, 
+    "RunServer": false, 
+    "SafeTPAfterExit": true, 
+    "Safe_TP": [
+        0, 
+        0.5, 
+        77.5, 
+        0.5
+    ], 
+    "SaveRegions": {
+        "-1": [
+            [
+                -312.5, 
+                -312.5, 
+                312.5, 
+                312.5
+            ]
+        ], 
+        "0": [
+            [
+                -2500, 
+                -2500, 
+                2500, 
+                2500
+            ]
+        ], 
+        "1": [
+            [
+                -Infinity, 
+                -Infinity, 
+                Infinity, 
+                Infinity
+            ]
+        ]
+    }, 
+    "backup_strftime": "backup_%Y%m%d_%H%M%S.%f.zip", 
+    "backupdir": "backups", 
+    "backupexclude": [
+        "backups/", 
+        "logs/", 
+        "mods/", 
+        "logs/", 
+        ".jar", 
+        ".zip"
+    ], 
+    "basedir": "/FIXME/minecraft", 
+    "world": "world"
+}
+
+Note that the save regions are actually regions, they will be rounded up to 512 blocks so in the above case -2560 to 2559 will be the 'saved' area, a build border might be 'set' near 2400 and the actual world border at -3000 to 3000 (a diameter of 6000).  Also remember the Nether is at 1/8th scale.
+
+After saving the configuration file somewhere a shell script like this might be useful:
+
+#!/bin/sh
+# use with _stopped in https://www.multicraft.org/site/docs/howto#2.2.1
+python /path/msw.py -c /path/msw.config.json -d "${SERVER_DIR}" -w "${WORLD}"
+
+
+The above file might need to be set chmod +x and the full path to python (2.7, 3.3, 3.4, 3.5 or 3.6) could also be used if desired.  A similar (cmd?) script probably works if the host environment is Windows.
+
+# ### FIXME ###
+# https://python-future.org/compatible_idioms.html#dictionaries
+# subprocess

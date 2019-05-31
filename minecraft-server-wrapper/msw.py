@@ -314,17 +314,9 @@ if __name__ == '__main__':
     msw.worker()
 
 
-# https://www.multicraft.org/site/page/features
-# https://www.multicraft.org/site/docs/howto#2.2.1
 # https://dinnerbone.com/minecraft/tools/coordinates/
 # https://minecraft.gamepedia.com/NBT_format
 # https://github.com/twoolie/NBT  ### Currently supported versions: 2.7, 3.3, 3.4, 3.5, 3.6
 # Example: https://github.com/twoolie/NBT/blob/master/examples/player_print.py
 # https://minecraft.gamepedia.com/Player.dat_format
 # https://minecraft.gamepedia.com/Chunk_format#Entity_format >> Pos: TAG_Doubles x,y,z  Dimension: w
-
-# ### FIXME ###
-# scrub all iteratoins https://python-future.org/compatible_idioms.html#dictionaries
-# backup
-# subprocess runner
-# test
