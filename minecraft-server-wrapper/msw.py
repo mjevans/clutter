@@ -64,7 +64,7 @@ class MinecraftServerWrapper(object):
             self.config["basedir"] = self.parser.basedir
         if self.parser.world != "world" or "world" not in self.config:
             self.config["world"] = self.parser.world
-        perr("msw __init__ completed :: version 20190530")
+        perr("msw __init__ completed :: version 20190531")
 
     def configLoad(self, a_file):
         raw_cfg = {}
@@ -112,7 +112,7 @@ class MinecraftServerWrapper(object):
             for ii in range(0, 3):
                 if not isinstance(raw_cfg["SafeTP"][ii], (int, float)):
                     valid = False
-                    perr("Provided config: 'SafeTP' invalid number '{0}'".format(raw_cfg["Safe_TP"][ii]))
+                    perr("Provided config: 'SafeTP' invalid number '{0}'".format(raw_cfg["SafeTP"][ii]))
         else:
             raw_cfg["SafeTP"] = [0, 0.5, 80.0, 0.5]
 
