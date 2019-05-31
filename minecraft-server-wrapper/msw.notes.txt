@@ -54,7 +54,7 @@ An example config file might be customized (change from the defaults) like thus:
     "RunLoop": false, 
     "RunServer": false, 
     "SafeTPAfterExit": true, 
-    "Safe_TP": [
+    "SafeTP": [
         0, 
         0.5, 
         77.5, 
@@ -101,6 +101,8 @@ An example config file might be customized (change from the defaults) like thus:
 }
 
 Note that the save regions are actually regions, they will be rounded up to 512 blocks so in the above case -2560 to 2559 will be the 'saved' area, a build border might be 'set' near 2400 and the actual world border at -3000 to 3000 (a diameter of 6000).  Also remember the Nether is at 1/8th scale.
+
+Also note: it might be desirable to have a bigger Nether anyway, for fortress hunting and build area.
 
 After saving the configuration file somewhere a shell script like this might be useful:
 
