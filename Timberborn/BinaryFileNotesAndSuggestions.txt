@@ -2,20 +2,22 @@
 
 Thoughts about a binary Timberborn save format (specific, any game generic) and some library notes for a possible C level converter (so that ancient JSON level support doesn't need to be maintained).
 
-Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to anyone skilled in the art / science.  If law prevents the denial of copyright, I release these notes and ideas simultaneously under CC0, MIT, LGPL or GPL (for both: any version in perpetuity, newer, older, etc).
+Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to anyone skilled in the art / science.  If law prevents the denial of copyright, I release these notes and ideas simultaneously under CC0, MIT, LGPL or GPL (for both: any version in perpetuity, newer, older, etc). Please choose from among those licenses if copyright cannot be disclaimed.
  * https://creativecommons.org/share-your-work/public-domain/cc0/
  * https://opensource.org/licenses/MIT
  * https://www.gnu.org/licenses/licenses.html
 
+ Initial notes 2021-10-14:
+
  Please :FIXME:
- 
+
  Format oddities / incompatibilities ("GameVersion" : "v20211008-31c08af-sw")
   - some floats are emitted oddly, E.G. {"Rotation":{"X":-.,"Y":-.,"Z":-.,"W":1.0}} << This faults even more lax parsers.
     // sed -i 's/:-./:0.0/g' # store as 0.0 not -.
   - STUPIDLY long lines, mostly caused by no newlines ever, serializing 'image' like blob maps as single strings, emit a newline after each object would be best / easy?
-  
+ 
  Review of the largest blobs and sections in the current JSON files.
-  
+ 
   "Entities" is a _large_ array of many different entities on the map, each of which follows a different template.
   - Base entity values could greatly benefit from representation in a fixed binary (stored struct) format. This is contrasted by the variability of subkeys which are all optional.
   - Very common entities might be factored out to binary lists.  E.G. Trees (Birch, Pine, Maple AKA 'log'), Berries, Crops (Carrot, Potatoes, Wheat), Path, Levee, continue to look for low hanging fruit.
@@ -45,17 +47,17 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
         - shouldn't re-store the game's map size
         - SHOULD be a bitfield / bit vector; one of the other reasons to use a 64 (8x8) square is a 64 bit word would also match that bitfield nicely, let the compilers figure out how to optimally index.
   - Some areas use double precision floats (8 bytes) where single precision would readily be sufficient... E.G. offset of an object or rotation.
-        
+       
   A great deal of the non-entity structure that isn't a 'tile blob' could be stored flattened among a typed series of key:value entries, though implementing that is likely very low priority, adding some reserved space for it seems like a good idea at the time.  At runtime they're probably stored in a hash/map/dict anyway, so sorting in the file (nor during serialization) is required.
 
-  
+ 
   Proposed binary format:
   (Also see https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md )
 
   Instead of a magic number, a human recognizable (self-documenting) raw byte array replaces the 'magic number' and provides data for file and similar magic fingerprint databases. https://manpages.ubuntu.com/manpages/focal/en/man1/file.1.html https://manpages.ubuntu.com/manpages/focal/en/man5/magic.5.html
-  
- Header structures / types:
  
+ Header structures / types:
+
  struct PBstring { // Pascal byte-length prefixed string
     uint8_t len;
     char[] str;  // C99+ // optional null (must include in len)
@@ -64,11 +66,11 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
     struct PBstring *name; // pointers are serialized to disk in sequence
     ptrdiff_t offset;
  }
- 
-// Considering how frequently this is used for objects, smaller is probably better.  Unsigned 8 bits supports the current map sizes, Unsigned 16 bits could be future-proof overkill, or wait for a file version bump. 
+
+// Considering how frequently this is used for objects, smaller is probably better.  Unsigned 8 bits supports the current map sizes, Unsigned 16 bits could be future-proof overkill, or wait for a file version bump.
 #DEFINE mapsize_t uint8_t
-  
-  
+ 
+ 
 11 bytes - 'Timberborn'
  5 bytes - Padding / Optional : 40 bits of flags / reserved fields
  8 bytes - A full 64 bit signed timestamp based on unix epoch, converted to UTC timezone if possible.  This seems sufficiently overkill and easy to implement, plus it sorts nicely. https://en.wikipedia.org/wiki/Year_2038_problem#Possible_solutions
@@ -113,9 +115,9 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
     // OffsetIndex('KVstr32', fixme) // PBstring32 - Extension suggestion for consideration
     // why not PBstring16? The vast majority of strings were very short (or keys, but also short).  Any that were large were VERY large.  Such as the whole file JSON blob (or the arrays that were already broken out above).
  }
- 
+
  // Traversal / iteration can use 1 + (first byte of a structure) + sizeof(val) to find the next starting offset.
- 
+
  struct KVint32 {
      struct PBstring *name;
      int32_t val; // signed integer 32 bit
@@ -132,9 +134,9 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
      struct PBstring *name;
      double val; // double precision float (8 bytes)
  }
- 
+
  // Traversal is two step
- 
+
  struct KVstr8 {
      struct PBstring *name;
      struct PBstring *val; // optional null (must include in len)
@@ -144,7 +146,7 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
      uint32_t len;
      char val[]; // C99+ terminated by len above, optional null (must include in len)
  }
- 
+
  struct ArrTree {
      mapsize_t x;
      mapsize_t y;
@@ -192,6 +194,129 @@ Copyright - Not Applicable 2021 - mjevans : These thoughts SHOULD be OBVIOUS to 
  // - considered 5 of the libraries listed on https://www.json.org/json-en.html
  //   - https://github.com/cesanta/mjson  MIT Licensed, multiple contributors, simple structure
  // zstd https://github.com/facebook/zstd
- 
- 
+
+ Addition 2021-10-17:
+
+ Observation notes:
+
+ - ArrTree is a subset of ArrGrowable, but that's less obvious in the JSON
+
+ - Many of the floats do not need to be 32 bit single precision floats.
+
+ A full float / double might work better at runtime for math and GPU usage.  A fixed precision integer would factor out portions of the float that aren't useful for the expected data.
+
+ mrmrDiameterScale / HeightScale appear to have a range of roughly 0.8 to 1.2  A numeric range of 0.4
+ uint8_t could represent 0.4/256 has a step-size of 0.00156 (3~4 decimal precision places)
+ uint16_t ~= 0.4/65536 ~= 0.00000610356 (5~6 decimal precision places)
+
+ For storage (and initial creation should round trip the storage and recall functions to pre-apply the lossy compression) the more limited precision 8 bits of fraction offers the range seems more than sufficient for object scale data.
+
+// The results can also be packed and bit/shifted if fragmentation is required.  E.G. a uint16_t could temporarily store 0:4095 or 0:16383 and store within a bitfield fragment of the correct size.
+
+// uint8_t precision range  = (uint8_t)((INPUT - 0.8) * 256.0 / 0.4) ; ->> (OUTPUT_t)(((double)(FILE_V)) / 256.0 * 0.4 + 0.8)
+#DEFINE packIntFraction(IN, IN_BASE, IN_RANGE, OUT_T, OUT_RANGE) (OUT_T)((IN - IN_BASE) * IN_RANGE / OUT_RANGE)
+#DEFINE unpackIntFraction(MEM_T, MEM_BASE, MEM_RANGE, FILE_V, FILE_RANGE) (MEM_T)(((double)(FILE_V)) / FILE_RANGE * MEM_RANGE + MEM_BASE)
+
+#DEFINE packFileNrmr(IN) packIntFraction(IN, 0.8, 0.4, uint8_t, 256)
+#DEFINE unpackFileNrmr(FV) unpackIntFraction(float /-:FIXME:-/, 0.8, 0.4, FV, 256)
+
+
+struct ArrGrowable {
+    mapsize_t x;
+    mapsize_t y;
+    uint8_t z;
+    uint8_t xoff; // Range ~ 0.25 to 0.25 CoordinatesOffset
+    uint8_t yoff; // packIntFraction(..., -0.25, 0.5, uint8_t, 256.0)
+    uint8_t nrmrDia; // packFileNrmr
+    uint8_t nrmrHeight;
+    uint8_t nrmrRotation; // packIntFraction(..., 0.0, 360, uint8_t, 256.0) // Optional: uint16_t could be used; or instead a precision of ~10-14 bits, packed elsewhere
+    uint8_t growth; // have both growth under Growable and GatherableYieldGrower ?
+    // packIntFraction(..., 0.0, 1.0, uint8_t, 256.0)
+    uint8_t GrowthProgress; // Would a numeric 'stages' value better capture this, rather than 0-100% ?
+    uint8_t DyingProgress;  // Would a numeric 'stages' value better capture this, rather than 0-100% ?
+    uint8_t CardinalRotation:2, IsDead:1, IsDry:1, IsGrown:1, IsGatherable:1; // bitfield as flags
+    // uint8_t YieldAmount : 4; // This is static per tree type? Implicit therefore do not include
+    uint8_t uuid[16]; // Is this deterministic based on the object's stored data?  It would be GREAT if it could be re-computed on load instead of stored.
+}
+// 12+16 for UUID compared to the old version's 36+16 4+8*4+16; 24 bytes PER OBJECT saved.
+
+struct ArrFinishedSimpleObject { // If this is finished all the construction site stuff should be discarded... why is this still in the save files?
+    mapsize_t x;
+    mapsize_t y;
+    uint8_t z;
+    uint8_t CardinalRotation:2, DeliverPrio:1, Workers:2, Priority:3; // Only fully FINISHED or Newly Placed (no work, no items) objects; in progress should be an old style JSON Entities, like complex buildings.
+    uint32_t pacedData; // InputsBufs? Progress (consumption) stages/ticks? OutputBuf? Beavers assign to buildings, that's in the JSON stream.
+    // Some simple unfinished objects MIGHT be packable within this data-space too, depending... would eat at least one flag bit somewhere.
+    // E.G. (Potato) Grill: uint32_t infood:5, logs:3, ready:7, fuelStages:4;
+    // E.G. (Bread) Bakery: uint32_t infood:6, logs:3, ready:8, fuelStages:4;
+    uint8_t uuid[16]; // Is this deterministic based on the object's stored data?  It would be GREAT if it could be re-computed on load instead of stored.
+}
+// 8 + 16 for UUID
+
+// *** :::FIXME::: *** Think critically about the allowed range and required precision of everything in the save file.  The best compression is data factored out entirely.
+// 2273 Growable entities - grep -E '"(Maple|Pine|Birch|Carrot|Potato|Wheat)"' savefile.json | sed -e 's/.* : //g;s/,//g' | wc -l
+// 461 bytes: {"Components":{"BlockObject":{"Coordinates":{"X":109,"Y":117,"Z":16}},"CoordinatesOffseter":{"CoordinatesOffset":{"X":0.23499769,"Y":-0.232873976}},"Growable":{"GrowthProgress":1},"NaturalResourceModelRandomizer":{"DiameterScale":0.8770159,"HeightScale":1.00597835,"Rotation":177.604141},"WateredNaturalResource":{"DryingProgress":0},"Yielder:Cuttable":{"Yield":{"Amount":8,"Good":{"Id":"Log"}}}},"Id":"2ad95aa6-96fb-494f-9d19-3e3660052753","Template":"Maple"},
+// 276 bytes: {"Components":{"BlockObject":{"Coordinates":{"X":40,"Y":79,"Z":4}},"Growable":{"GrowthProgress":1},"WateredNaturalResource":{"DryingProgress":0},"Yielder:Cuttable":{"Yield":{"Amount":3,"Good":{"Id":"Carrot"}}}},"Id":"d4de5407-4a90-4d9b-8514-b030b0a021e1","Template":"Carrot"},
+// ~(16 bytes file overhead) * 6 + 28 * 2273 ~= 63740 vs 997348 =~ 2000 * 461 + 273 * 276
+// NOTE: Very rough estime, for growable objects, the binary format uses only 6.4% the space, this is before any possible savings the compression can add on top.
+
+
+
+struct OffsetIndex {
+    struct PBstring *name; // pointers are serialized to disk in sequence
+    ptrdiff_t offset;
+    size_t count; // Reconsidered during review; a count of the stored objects might be desirable for the 'list size' as well.
+}
+
+struct CompressedSave {
+    uint32_t OffsetCount; // Help terminate scanning.  Prospective SERIAL for format version (data types are never removed or number is still unique).  Why more than 255, 65535? 255 seems risky low for mods and general future proof. ~64K / 32K is probably overkill, but why not be sure; just like with the map size.  If map size are 16bit 64K for offsets also seems reasonable (but then 16+16+32 packs to a 64 word nicely also).
+    mapsize_t MapSizeX;
+    mapsize_t MapSizeY;
+    struct OffsetIndex Offsets[] // arrays / pointers are serialized to disk in sequence.
+    // It'll be easier to use the offset within the decompressed stream / buffer
+    // MIN CurrentOffsetSegment = 2 + (NumOffsets) * (1 + sizeof(ptrdiff_t)) + length(concat(OffsetNames[]))
+    // Round up to next word alignment, possibly page alignment, should improve parse performance with aligned accesses.
+    //
+    // An implicit maximum number of items (zero padding) could be computed by subtracting from the next segment's start / size of object; while an explicit array size allows for arbitrary padding.
+    //
+    // OffsetIndex('TerrainHeights', CurrentOffsetSegment, 0) // The size is implicit from the map size
+    // OffsetIndex('SoilMoistureSimulator', fixme, 0)
+    // OffsetIndex('WaterDepths', fixme, 0)
+    // OffsetIndex('Outflows', fixme, 0)
+    // OffsetIndex('Felling...', fixme, 0) // Cut trees where? just like the planting maps; 2d, one bit per square; blocked (batched) the same way TerrainHeights is.
+    // OffsetIndex('PlantingCarrots', fixme, 0) // Or should planting maps care about object rotation? If rotation pack (unmodded) type and rotation? type:2 ENUM(NONE=0, CARROT, POTATO, WHEAT) rot:2
+    // OffsetIndex('PlantingTaters', fixme, 0) // Another option is to store four clean single bit planes, per crop, one for each possible rotation value; this is likely to compress the best; big runs of 0.
+    // OffsetIndex('PlantingWheat', fixme, 0)
+    // OffsetIndex('Planting...', fixme, 0)
+    // OffsetIndex('JSON', fixme, length) // anything stored in the JSON blob
+    // Offset for lists of: Trees (Birch, Pine, Maple AKA 'log'), Berries, Crops (Carrot, Potatoes, Wheat)
+    // OffsetIndex('Birch', fixme, count) ArrTree
+    // OffsetIndex('Pine', fixme, count) ArrTree
+    // OffsetIndex('Maple', fixme, count) ArrTree
+    // OffsetIndex('Berries', fixme, count) ArrGrowable
+    // OffsetIndex('Carrots', fixme, count) ArrGrowable
+    // OffsetIndex('Potatoes', fixme, count) ArrGrowable
+    // OffsetIndex('Wheat', fixme, count) ArrGrowable
+    // OffsetIndex('Path', fixme, count) // FinishedSimpleObject -- Only fully FINISHED or Newly Placed (no work, no items) objects; in progress should be an old style JSON Entities, like complex buildings.
+    // OffsetIndex('Levee', fixme, count) // FinishedSimpleObject -- Only fully FINISHED or Newly Placed (no work, no items) objects; in progress should be an old style JSON Entities, like complex buildings.
+    // OffsetIndex('...', fixme, count) // FinishedSimpleObject -- Only fully FINISHED or Newly Placed (no work, no items) objects; in progress should be an old style JSON Entities, like complex buildings.
+    // OffsetIndex('KVint32', fixme, count) // signed int32 - Extension suggestion for consideration
+    // OffsetIndex('KVint64', fixme, count) // signed int64 - Extension suggestion for consideration
+    // OffsetIndex('KVfloat', fixme, count) // single precision floats - Extension suggestion for consideration
+    // OffsetIndex('KVdouble', fixme, count) // double precision floats - Extension suggestion for consideration
+    // OffsetIndex('KVstr8', fixme, count) // PBstring8 - Extension suggestion for consideration
+    // OffsetIndex('KVstr32', fixme, count) // PBstring32 - Extension suggestion for consideration
+    // why not PBstring16? The vast majority of strings were very short (or keys, but also short).  Any that were large were VERY large.  Such as the whole file JSON blob (or the arrays that were already broken out above).
+}
+
+struct TimberbornFile_r1 {
+    char name[11]; // write: 'Timberborn'
+    uint8_t bitpad[5]; // FIXME: RESERVED
+    __time64_t time64bit; // Convert to/from UTC if possible.
+    // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/time-time32-time64?view=msvc-160
+    //  * bytes - Any other out of compressed segment (preview friendly) data with fixed lengths and offsets
+    void *CompressedSave_Datastream; // zstd or other compressed stream wrapper, please enable size and checksum validation
+}
+
+
  */
